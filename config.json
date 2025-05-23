@@ -1,0 +1,14 @@
+{
+    "api_key": "YOUR_API_KEY_HERE",
+    "scan_interval": 60,
+    "profit_threshold": 0.02,
+    "max_stocks_to_analyze": 50,
+    "trading_enabled": false,
+    "tickers_source": "alphavantage",
+    "strategy": "combined",
+    "rsi_period": 14,
+    "rsi_oversold": 30,
+    "rsi_overbought": 70,
+    "short_ma_period": 5,
+    "long_ma_period": 20
+}
