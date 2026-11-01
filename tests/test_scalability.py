@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from trading_bot.tools.loadtest import LoadTestOptions, LoadTestReport, format_report, run_load_test
+from trading_bot.tools.loadtest import LoadTestOptions, LoadTestReport, format_report, run_load_test, write_report
 
 from .web_helpers import TEST_PASSWORD, TEST_USER, LiveServer, start_live_server, write_project
 
@@ -52,3 +52,18 @@ def test_report_thresholds_are_enforced() -> None:
     assert "error rate 5.00% exceeds 1.00%" in text
     assert "FAIL" in format_report(report)
     assert report.to_dict()["passed"] is False
+
+
+def test_report_writing_is_best_effort(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    report = LoadTestReport(requests=10, duration=1.0, latencies_ms=[5.0] * 10, ws_clients=1, ws_connected=1,
+                            ws_received_scan=1, fanout_ms=10.0)
+    target = tmp_path / "out" / "loadtest.json"
+    target.parent.mkdir()
+    assert write_report(report, str(target)) is True
+    assert '"passed": true' in target.read_text()
+    assert write_report(report, "-") is True  # stdout
+    assert '"rps": 10.0' in capsys.readouterr().out
+    # An unwritable location (e.g. a bind mount owned by another user) does not fail the run.
+    assert write_report(report, str(tmp_path / "missing-dir" / "loadtest.json")) is False
+    captured = capsys.readouterr()
+    assert "could not write report" in captured.err and '"passed": true' in captured.out

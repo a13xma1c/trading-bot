@@ -99,10 +99,12 @@ jobs:
           [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18080/api/status)" = "401" ]
           docker exec smoke id -u | grep -qx 1000   # runs unprivileged
           docker rm -f smoke
+      - name: Prepare report directory
+        # Bind-mounted into containers that run as an unprivileged user (UID 1000), while the
+        # runner's checkout is owned by a different UID: make it world-writable.
+        run: mkdir -p reports && chmod -R a+rwX reports
       - name: Unit / API / scalability tests inside the container
-        run: |
-          mkdir -p reports
-          docker compose -f docker-compose.ci.yml --profile tests run --rm unit-tests
+        run: docker compose -f docker-compose.ci.yml --profile tests run --rm unit-tests
       - name: Load / scalability test (300 WebSocket clients, 30 HTTP users, 30 s)
         run: |
           docker compose -f docker-compose.ci.yml up --abort-on-container-exit --exit-code-from loadtest

@@ -232,7 +232,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-fanout-ms", type=float)
     parser.add_argument("--min-rps", type=float)
     parser.add_argument("--max-error-rate", type=float, default=0.0)
-    parser.add_argument("--report", help="write the JSON report to this file")
+    parser.add_argument("--report", help="write the JSON report to this file ('-' for stdout)")
     args = parser.parse_args(argv)
     options = LoadTestOptions(url=args.url, username=args.username, password=args.password, ws_clients=args.ws_clients,
                               users=args.users, duration=args.duration, symbol=args.symbol, max_p95_ms=args.max_p95_ms,
@@ -240,9 +240,29 @@ def main(argv: list[str] | None = None) -> int:
     report = asyncio.run(run_load_test(options))
     print(format_report(report))
     if args.report:
-        with open(args.report, "w", encoding="utf-8") as fh:
-            json.dump(report.to_dict(), fh, indent=2)
+        write_report(report, args.report)
     return 0 if not report.failures else 1
+
+
+def write_report(report: LoadTestReport, path: str) -> bool:
+    """Write the JSON report; ``-`` means stdout.
+
+    A report location that cannot be written (e.g. a bind mount owned by another
+    user) must not turn a passed load test into a failure: the JSON is printed to
+    stdout instead and False is returned.
+    """
+    payload = json.dumps(report.to_dict(), indent=2)
+    if path == "-":
+        print(payload)
+        return True
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(payload + "\n")
+        return True
+    except OSError as exc:
+        sys.stderr.write(f"warning: could not write report to {path}: {exc}; printing it instead\n")
+        print(payload)
+        return False
 
 
 if __name__ == "__main__":

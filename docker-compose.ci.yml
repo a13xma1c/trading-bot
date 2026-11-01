@@ -41,6 +41,8 @@ services:
       - --max-fanout-ms=${LOADTEST_MAX_FANOUT_MS:-2000}
       - --min-rps=${LOADTEST_MIN_RPS:-100}
       - --report=/reports/loadtest.json
+    # The image runs as UID 1000; make sure ./reports is writable for it (the CI workflow does
+    # `chmod -R a+rwX reports`) or override the user here, e.g. `user: "${UID:-1000}:${GID:-1000}"`.
     volumes:
       - ./reports:/reports
 
