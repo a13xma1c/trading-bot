@@ -20,7 +20,8 @@
     "requests_per_day": null,
     "cache_ttl_seconds": 60,
     "csv_directory": "data",
-    "closed_bars_only": false
+    "closed_bars_only": false,
+    "symbols_file": ""
   },
   "market_hours": {
     "enabled": true,
@@ -41,6 +42,7 @@
     "webhook_url": "",
     "email": {
       "enabled": false,
+      "transport": "smtp",
       "host": "",
       "port": 587,
       "username": "",
@@ -63,7 +65,61 @@
     "username": "admin",
     "password_hash": "",
     "token": "",
+    "secret_key": "",
     "session_hours": 12,
+    "allow_signup": true,
+    "email_verification": "auto",
+    "public_url": "",
+    "base_path": "",
+    "worker_threads": 64,
     "open_browser": true
+  },
+  "ai": {
+    "enabled": false,
+    "base_url": "https://api.openai.com/v1",
+    "api_key": "",
+    "model": "gpt-4o-mini",
+    "timeout_seconds": 45.0
+  },
+  "execution": {
+    "slippage_model": "none",
+    "slippage_bps": 5.0,
+    "impact_coefficient": 0.1,
+    "max_participation_pct": 10.0,
+    "commission_per_order": 0.0,
+    "commission_per_share": 0.0,
+    "commission_pct": 0.0,
+    "min_commission": 0.0,
+    "limit_order_expiry_bars": 0
+  },
+  "payments": {
+    "provider": "mock",
+    "currency": "USD",
+    "min_amount": 10.0,
+    "max_amount": 1000000.0,
+    "stripe": {
+      "secret_key": "",
+      "webhook_secret": "",
+      "api_base": "https://api.stripe.com"
+    }
+  },
+  "fx": {
+    "provider": "frankfurter",
+    "base_currency": "USD",
+    "quote_currencies": [
+      "EUR",
+      "GBP",
+      "JPY",
+      "CHF",
+      "CAD",
+      "AUD",
+      "CNY",
+      "SEK",
+      "NOK",
+      "MXN",
+      "INR",
+      "BRL"
+    ],
+    "cache_ttl_seconds": 3600
   }
 }

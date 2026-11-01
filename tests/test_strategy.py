@@ -89,7 +89,8 @@ def test_cooldown_suppresses_repeated_signals(ohlcv: pd.DataFrame) -> None:
 
 def test_signal_key_and_describe() -> None:
     sig = Signal("AAPL", ACTION_SELL, "s", 10.5, datetime(2024, 1, 1, tzinfo=UTC), "why")
-    assert sig.key == ("s", "AAPL", "SELL", "2024-01-01T00:00:00+00:00")
+    assert sig.key == ("s", "AAPL", "SELL", "2024-01-01T00:00:00+00:00", "")
+    assert Signal("AAPL", ACTION_SELL, "s", 10.5, sig.bar_time, "why", account="bob").key[-1] == "bob"
     assert sig.headline() == "SELL AAPL @ 10.50"
     assert "why" in sig.describe()
     d = sig.to_dict()

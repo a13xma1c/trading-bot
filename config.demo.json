@@ -24,5 +24,16 @@
     "token": "",
     "session_hours": 12,
     "open_browser": true
+  },
+  "fx": {
+    "provider": "demo"
+  },
+  "execution": {
+    "slippage_model": "volume",
+    "slippage_bps": 5,
+    "commission_per_order": 1.0
+  },
+  "payments": {
+    "provider": "mock"
   }
 }

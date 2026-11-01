@@ -16,6 +16,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 PBKDF2_ITERATIONS = 600_000
 _ALGORITHM = "pbkdf2_sha256"
@@ -49,13 +50,64 @@ def _unb64(text: str) -> bytes:
     return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
 
 
-def validate_password_strength(password: str) -> str | None:
-    """Return a problem description or None if the password is acceptable."""
-    if len(password) < 8:
-        return "Password must be at least 8 characters long"
-    if password.strip() != password:
-        return "Password must not start or end with whitespace"
-    return None
+MIN_PASSWORD_LENGTH = 10
+MAX_PASSWORD_LENGTH = 128
+# Frequently leaked passwords (lower-cased, compared without symbols/digits stripped).
+COMMON_PASSWORDS = frozenset({
+    "password", "password1", "password123", "passw0rd", "p@ssw0rd", "123456", "12345678", "123456789",
+    "1234567890", "qwerty", "qwerty123", "qwertyuiop", "abc123", "letmein", "welcome", "welcome1", "admin",
+    "admin123", "administrator", "iloveyou", "monkey", "dragon", "sunshine", "princess", "football", "baseball",
+    "master", "login", "trading", "trader", "trading123", "bitcoin", "changeme", "secret", "test1234",
+})
+
+PASSWORD_RULES: list[tuple[str, str]] = [
+    ("length", f"At least {MIN_PASSWORD_LENGTH} characters"),
+    ("lowercase", "A lowercase letter"),
+    ("uppercase", "An uppercase letter"),
+    ("digit", "A digit"),
+    ("symbol", "A symbol (e.g. ! ? - _ #)"),
+    ("no_edges", "No leading or trailing spaces"),
+    ("not_username", "Does not contain the username"),
+    ("not_common", "Not a commonly used password"),
+    ("max_length", f"At most {MAX_PASSWORD_LENGTH} characters"),
+]
+
+
+def password_rules(password: str, username: str | None = None) -> list[dict[str, Any]]:
+    """Evaluate every password rule; mirrors ``static/js/passwords.js`` for live feedback."""
+    user = (username or "").strip().lower()
+    lowered = password.lower()
+    results = {
+        "length": len(password) >= MIN_PASSWORD_LENGTH,
+        "lowercase": any(c.islower() for c in password),
+        "uppercase": any(c.isupper() for c in password),
+        "digit": any(c.isdigit() for c in password),
+        "symbol": any(not c.isalnum() and not c.isspace() for c in password),
+        "no_edges": password == password.strip(),
+        "not_username": not user or len(user) < 3 or user not in lowered,
+        "not_common": lowered not in COMMON_PASSWORDS and lowered.rstrip("0123456789!?.") not in COMMON_PASSWORDS,
+        "max_length": len(password) <= MAX_PASSWORD_LENGTH,
+    }
+    return [{"id": rule_id, "label": label, "passed": results[rule_id]} for rule_id, label in PASSWORD_RULES]
+
+
+def password_score(password: str, username: str | None = None) -> int:
+    """0-4 strength estimate for the UI meter (rules met + length bonus)."""
+    rules = password_rules(password, username)
+    core = sum(1 for r in rules if r["passed"] and r["id"] in ("lowercase", "uppercase", "digit", "symbol"))
+    if not all(r["passed"] for r in rules):
+        return min(core, 2)
+    if len(password) >= 16 and core == 4:
+        return 4
+    return 3 if core >= 3 else 2
+
+
+def validate_password_strength(password: str, username: str | None = None) -> str | None:
+    """Return a description of the unmet requirements, or None if the password is acceptable."""
+    failed = [r["label"] for r in password_rules(password, username) if not r["passed"]]
+    if not failed:
+        return None
+    return "Password requirements not met: " + "; ".join(failed)
 
 
 class SessionSigner:
@@ -106,6 +158,16 @@ class SessionSigner:
             if token in self._revoked:
                 return None
         return username
+
+    @staticmethod
+    def peek_username(token: str | None) -> str | None:
+        """Username claimed by a token (unverified - always follow up with :meth:`verify`)."""
+        if not token or "." not in token:
+            return None
+        try:
+            return _unb64(token.rsplit(".", 1)[0]).decode("utf-8").split("|")[0] or None
+        except (ValueError, UnicodeDecodeError, IndexError):
+            return None
 
     def revoke(self, token: str | None) -> None:
         if not token or "." not in token:

@@ -423,3 +423,117 @@ export function drawEquityCurve(canvas, values) {
   values.forEach((v, i) => { if (v == null) return; if (i === 0) ctx.moveTo(x(i), y(v)); else ctx.lineTo(x(i), y(v)); });
   ctx.stroke();
 }
+
+/**
+ * Cumulative realized P&L after each closed trade.
+ * `points` is [{time, pnl, cumulative}] in chronological order; the area above zero is shaded green,
+ * below zero red so a glance tells whether the account is ahead.
+ */
+export function drawPnlCurve(canvas, points) {
+  const ctx = canvas.getContext("2d");
+  const dpr = window.devicePixelRatio || 1;
+  const width = canvas.clientWidth || 600, height = canvas.clientHeight || 220;
+  canvas.width = width * dpr; canvas.height = height * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+  ctx.font = "11px Roboto, system-ui, sans-serif"; ctx.textBaseline = "middle"; ctx.fillStyle = TEXT;
+  if (!points || !points.length) {
+    ctx.textAlign = "center";
+    ctx.fillText("No closed trades yet", width / 2, height / 2);
+    return;
+  }
+  const values = [0, ...points.map((p) => p.cumulative)];
+  const lo = Math.min(0, ...values), hi = Math.max(0, ...values);
+  const top = 12, bottom = height - BOTTOM_AXIS, left = 64, right = width - 12;
+  const y = (v) => bottom - ((v - lo) / ((hi - lo) || 1)) * (bottom - top);
+  const x = (i) => left + (i / Math.max(1, values.length - 1)) * (right - left);
+  ctx.strokeStyle = GRID; ctx.lineWidth = 1;
+  for (const t of niceTicks(lo, hi, 5)) {
+    ctx.beginPath(); ctx.moveTo(left, y(t) + 0.5); ctx.lineTo(right, y(t) + 0.5); ctx.stroke();
+    ctx.textAlign = "right"; ctx.fillText(formatPrice(t), left - 6, y(t));
+  }
+  // zero line
+  ctx.strokeStyle = "rgba(196, 198, 207, 0.45)"; ctx.beginPath(); ctx.moveTo(left, y(0) + 0.5); ctx.lineTo(right, y(0) + 0.5); ctx.stroke();
+  // shaded area, split at zero
+  const fill = (color, clipTop, clipBottom) => {
+    ctx.save(); ctx.beginPath(); ctx.rect(left, clipTop, right - left, clipBottom - clipTop); ctx.clip();
+    ctx.beginPath(); ctx.moveTo(x(0), y(0));
+    values.forEach((v, i) => ctx.lineTo(x(i), y(v)));
+    ctx.lineTo(x(values.length - 1), y(0)); ctx.closePath();
+    ctx.fillStyle = color; ctx.fill(); ctx.restore();
+  };
+  fill("rgba(78, 204, 163, 0.22)", top - 2, y(0));
+  fill("rgba(255, 123, 114, 0.22)", y(0), bottom + 2);
+  // line
+  const last = values[values.length - 1];
+  ctx.strokeStyle = last >= 0 ? UP : DOWN; ctx.lineWidth = 2; ctx.lineJoin = "round"; ctx.beginPath();
+  values.forEach((v, i) => { if (i === 0) ctx.moveTo(x(i), y(v)); else ctx.lineTo(x(i), y(v)); });
+  ctx.stroke();
+  // markers per trade
+  points.forEach((p, i) => {
+    ctx.fillStyle = p.pnl >= 0 ? UP : DOWN;
+    ctx.beginPath(); ctx.arc(x(i + 1), y(p.cumulative), values.length > 60 ? 1.5 : 3, 0, Math.PI * 2); ctx.fill();
+  });
+  // time axis: first, middle, last
+  ctx.fillStyle = TEXT; ctx.textBaseline = "top";
+  const labelAt = (i, align) => {
+    const ms = Date.parse(points[i].time);
+    if (Number.isNaN(ms)) return;
+    ctx.textAlign = align; ctx.fillText(formatTime(ms, false), x(i + 1), bottom + 6);
+  };
+  labelAt(0, points.length > 1 ? "left" : "center");
+  if (points.length > 2) labelAt(Math.floor((points.length - 1) / 2), "center");
+  if (points.length > 1) labelAt(points.length - 1, "right");
+}
+
+/**
+ * Generic time series line (e.g. an exchange rate).  `points` is [{date|time, value}] in chronological order.
+ * Options: `decimals` for the axis labels, `color`.
+ */
+export function drawLineSeries(canvas, points, { decimals = 4, color = "#8fb6ff", emptyText = "No data" } = {}) {
+  const ctx = canvas.getContext("2d");
+  const dpr = window.devicePixelRatio || 1;
+  const width = canvas.clientWidth || 600, height = canvas.clientHeight || 240;
+  canvas.width = width * dpr; canvas.height = height * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+  ctx.font = "11px Roboto, system-ui, sans-serif"; ctx.textBaseline = "middle"; ctx.fillStyle = TEXT;
+  const values = (points || []).map((p) => Number(p.value ?? p.rate)).filter((v) => Number.isFinite(v));
+  if (values.length < 2) { ctx.textAlign = "center"; ctx.fillText(emptyText, width / 2, height / 2); return; }
+  let lo = Math.min(...values), hi = Math.max(...values);
+  if (hi === lo) { lo -= Math.abs(lo) * 0.01 || 1; hi += Math.abs(hi) * 0.01 || 1; }
+  const pad = (hi - lo) * 0.08; lo -= pad; hi += pad;
+  const top = 12, bottom = height - BOTTOM_AXIS, left = 72, right = width - 12;
+  const y = (v) => bottom - ((v - lo) / (hi - lo)) * (bottom - top);
+  const x = (i) => left + (i / (values.length - 1)) * (right - left);
+  const fmt = (v) => v.toLocaleString(undefined, { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+  ctx.strokeStyle = GRID; ctx.lineWidth = 1;
+  for (const t of niceTicks(lo, hi, 5)) {
+    ctx.beginPath(); ctx.moveTo(left, y(t) + 0.5); ctx.lineTo(right, y(t) + 0.5); ctx.stroke();
+    ctx.textAlign = "right"; ctx.fillText(fmt(t), left - 6, y(t));
+  }
+  const up = values[values.length - 1] >= values[0];
+  const line = color || (up ? UP : DOWN);
+  ctx.save(); ctx.beginPath(); ctx.moveTo(x(0), bottom);
+  values.forEach((v, i) => ctx.lineTo(x(i), y(v)));
+  ctx.lineTo(x(values.length - 1), bottom); ctx.closePath();
+  const gradient = ctx.createLinearGradient(0, top, 0, bottom);
+  gradient.addColorStop(0, up ? "rgba(78, 204, 163, 0.28)" : "rgba(255, 123, 114, 0.28)");
+  gradient.addColorStop(1, "rgba(0, 0, 0, 0)");
+  ctx.fillStyle = gradient; ctx.fill(); ctx.restore();
+  ctx.strokeStyle = up ? UP : DOWN; ctx.lineWidth = 2; ctx.lineJoin = "round"; ctx.beginPath();
+  values.forEach((v, i) => { if (i === 0) ctx.moveTo(x(i), y(v)); else ctx.lineTo(x(i), y(v)); });
+  ctx.stroke();
+  // last value marker
+  ctx.fillStyle = line === color ? (up ? UP : DOWN) : line;
+  ctx.beginPath(); ctx.arc(x(values.length - 1), y(values[values.length - 1]), 3.5, 0, Math.PI * 2); ctx.fill();
+  // time axis
+  ctx.fillStyle = TEXT; ctx.textBaseline = "top";
+  const label = (i, align) => {
+    const raw = points[i].date || points[i].time;
+    const ms = Date.parse(raw);
+    if (Number.isNaN(ms)) return;
+    ctx.textAlign = align; ctx.fillText(formatTime(ms, false), x(i), bottom + 6);
+  };
+  label(0, "left"); label(Math.floor((points.length - 1) / 2), "center"); label(points.length - 1, "right");
+}

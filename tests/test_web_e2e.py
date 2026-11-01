@@ -7,13 +7,16 @@ and the chart is verified by inspecting canvas pixels.
 
 from __future__ import annotations
 
+import email
 import re
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from trading_bot.broker import Fill
 from trading_bot.config import AppConfig
 from trading_bot.data import DemoProvider, TwelveDataProvider
 
@@ -81,7 +84,9 @@ def test_dashboard_renders_material_layout_and_chart(page: Page, server: LiveSer
     surface = page.evaluate("getComputedStyle(document.documentElement).getPropertyValue('--md-sys-color-surface').trim()")
     assert surface == "#111418"
     assert page.evaluate("getComputedStyle(document.body).backgroundColor") == "rgb(17, 20, 24)"
-    expect(page.locator("nav.nav-rail .nav-item")).to_have_count(4)
+    expect(page.locator("nav.nav-rail .nav-item")).to_have_count(9)
+    expect(page.locator("nav.nav-rail .nav-item .label-medium")).to_have_text(
+        ["Dashboard", "Strategies", "Positions", "Trade", "Wallet", "History", "Insights", "FX", "Settings"])
     expect(page.locator("#navDashboard")).to_have_class(re.compile(r"active"))
     expect(page.locator("header.top-app-bar")).to_be_visible()
     expect(page.locator("#engineStateText")).to_have_text("Engine stopped")
@@ -133,11 +138,32 @@ def test_chart_zoom_pan_and_reset(page: Page) -> None:
 
 
 def test_add_and_remove_symbol(page: Page, server: LiveServer) -> None:
+    rows = page.locator("#watchlistTable tbody tr")
+    expect(rows.nth(0)).to_contain_text("Apple Inc.")  # company names from the local directory
+    expect(page.locator("#chartName")).to_have_text("Apple Inc.")
+
+    # Typing suggests tickers with their names; pick one with the keyboard.
+    page.type("#watchlistSymbolInput", "nvid")
+    menu = page.locator("#watchlistSymbolInputMenu")
+    expect(menu).to_be_visible()
+    expect(menu.locator(".menu-item").first).to_contain_text("NVDA")
+    expect(menu.locator(".menu-item").first).to_contain_text("NVIDIA Corporation")
+    page.keyboard.press("ArrowDown")
+    expect(menu.locator(".menu-item").first).to_have_class(re.compile(r"active"))
+    page.keyboard.press("Enter")
+    expect(rows).to_have_count(3)
+    expect(rows.nth(2).locator("td").nth(0)).to_contain_text("NVDA")
+    expect(rows.nth(2).locator("td").nth(0)).to_contain_text("NVIDIA")
+    expect(menu).to_be_hidden()
+    page.wait_for_function("window.__app.chart.getState().symbol === 'NVDA' && window.__app.chart.bars.length > 0")
+    rows.nth(2).locator("button.remove-symbol").click()
+    expect(rows).to_have_count(2)
+
+    # Plain Enter still works for symbols the directory does not know.
     page.fill("#watchlistSymbolInput", "nvda")
     page.press("#watchlistSymbolInput", "Enter")
-    rows = page.locator("#watchlistTable tbody tr")
     expect(rows).to_have_count(3)
-    expect(rows.nth(2).locator("td").nth(0)).to_have_text("NVDA")
+    expect(rows.nth(2).locator("td").nth(0)).to_contain_text("NVDA")
     expect(page.locator("#chartTitle")).to_have_text("NVDA")  # the new symbol is charted
     page.wait_for_function("window.__app.chart.getState().symbol === 'NVDA' && window.__app.chart.bars.length > 0")
     expect(page.locator("#watchlistSymbolInput")).to_have_value("")
@@ -167,10 +193,16 @@ def test_start_engine_shows_signal_notification(page: Page, server: LiveServer) 
     page.wait_for_function("[...document.querySelectorAll('#signalsTable tbody tr')].some(r => r.innerText.includes('Always Buy'))")
     row = page.locator("#signalsTable tbody tr", has_text="Always Buy").first
     expect(row.locator(".pill")).to_have_text("BUY")
-    expect(row.locator("td").nth(5)).to_have_text("yes")  # executed by the paper broker
+    # Every watchlist symbol gets exactly one executed BUY: the first strategy that fires on a bar opens the
+    # position (usually Always Buy; MA Crossover may beat it on some bars), later BUYs on the same symbol do not add.
+    page.wait_for_function("[...document.querySelectorAll('#signalsTable tbody tr')].filter(r => r.children[5].innerText === 'yes').length >= 2", timeout=15000)
+    executed = page.locator("#signalsTable tbody tr").filter(has=page.locator("td:nth-child(6)", has_text="yes"))
+    expect(executed).to_have_count(2)
+    symbols = {executed.nth(i).locator("td").nth(1).inner_text() for i in range(2)}
+    assert symbols == {"AAPL", "MSFT"}
     snackbar = page.locator("#snackbar")
     expect(snackbar).to_have_class(re.compile(r"open"))
-    expect(snackbar).to_contain_text("Executed: BUY")
+    expect(snackbar).to_contain_text("BUY")
     expect(page.locator("#signalsCount")).to_contain_text("recent")
 
     page.click("#navPositions")
@@ -347,14 +379,25 @@ def test_login_page_flow(browser: Browser, tmp_path: Path) -> None:
         page.wait_for_url("**/login")  # anonymous users land on the login page
         expect(page).to_have_title(re.compile("Sign in"))
         expect(page.locator("#loginSubtitle")).to_have_text("Sign in to continue")
-        expect(page.locator("#usernameInput")).to_have_value(TEST_USER)
+        expect(page.locator("#usernameLabel")).to_have_text("Username or e-mail")
         expect(page.locator("#confirmField")).to_be_hidden()
+        expect(page.locator("#signupLink")).to_be_visible()  # self-service registration is on by default
         assert page.evaluate("getComputedStyle(document.querySelector('#loginCard')).borderRadius") == "28px"  # MD3 extra-large shape
 
+        page.fill("#usernameInput", TEST_USER)
         page.fill("#passwordInput", "wrong password")
         page.click("#loginButton")
-        expect(page.locator("#loginError")).to_have_text("Invalid username or password")
+        expect(page.locator("#loginError")).to_have_text("Invalid username/e-mail or password")
         assert "/login" in page.url
+
+        # Reveal-password toggle (injected next to every password field).
+        toggle = page.locator("#passwordInput ~ .pw-toggle")
+        expect(toggle).to_have_attribute("aria-pressed", "false")
+        toggle.click()
+        expect(page.locator("#passwordInput")).to_have_attribute("type", "text")
+        expect(page.locator("#passwordInput")).to_have_value("wrong password")
+        toggle.click()
+        expect(page.locator("#passwordInput")).to_have_attribute("type", "password")
 
         page.fill("#passwordInput", TEST_PASSWORD)
         page.press("#passwordInput", "Enter")
@@ -367,9 +410,10 @@ def test_login_page_flow(browser: Browser, tmp_path: Path) -> None:
         page.goto(live.url + "login")
         page.wait_for_url(live.url)
 
-        # Logout returns to the login page and the session is gone.
+        # Logout returns to the login page (with the sign-up option) and the session is gone.
         page.click("#logoutButton")
         page.wait_for_url("**/login")
+        expect(page.locator("#signupLink")).to_be_visible()
         page.goto(live.url)
         page.wait_for_url("**/login")
     finally:
@@ -396,41 +440,211 @@ def test_first_run_setup_page(browser: Browser, tmp_path: Path) -> None:
         expect(page.locator("#providerNote")).to_contain_text("25/day")
         page.select_option("#providerSelect", "demo")
         page.fill("#usernameInput", "owner")
-        page.fill("#passwordInput", "first run password")
+
+        # Requirements are checked live while typing (server rules mirrored in the browser).
+        rules = page.locator("#passwordFeedback .pw-rules li")
+        expect(rules).to_have_count(9)
+        page.type("#passwordInput", "owner")
+        expect(rules.filter(has_text="lowercase")).to_have_class(re.compile(r"passed"))
+        expect(rules.filter(has_text="At least 10")).to_have_class(re.compile(r"failed"))
+        expect(rules.filter(has_text="username")).to_have_class(re.compile(r"failed"))
+        expect(page.locator("#passwordFeedback .pw-meter-label")).to_contain_text("requirements not met")
+        page.fill("#confirmInput", "owner")
+        page.click("#loginButton")  # blocked client-side with the unmet rules listed
+        expect(page.locator("#loginError")).to_contain_text("Password requirements not met")
+        expect(page.locator("#loginError")).to_contain_text("username")
+        page.fill("#passwordInput", "First-run-pass1!")
+        expect(page.locator("#passwordFeedback")).to_have_class(re.compile(r"all-passed"))
+        expect(rules.filter(has_text="username")).to_have_class(re.compile(r"passed"))
+        expect(page.locator("#passwordFeedback .pw-meter")).to_have_attribute("data-score", re.compile(r"[34]"))
         page.fill("#confirmInput", "different")
+        expect(page.locator("#confirmField")).to_have_class(re.compile(r"invalid"))
         page.click("#loginButton")
         expect(page.locator("#loginError")).to_have_text("Passwords do not match")
-        page.fill("#confirmInput", "first run password")
+        page.fill("#confirmInput", "First-run-pass1!")
         page.click("#loginButton")
         page.wait_for_url(live.url)
         page.wait_for_function("window.__app && window.__app.chart.bars.length > 0", timeout=15000)
         expect(page.locator("#userName")).to_have_text("owner")
         saved = AppConfig.load(live.config_path)
-        assert saved.web.username == "owner" and saved.web.password_hash.startswith("pbkdf2_sha256$")
+        assert saved.web.username == "owner" and saved.web.password_hash == ""  # credentials live in the user store
+        admin = live.engine.storage.find_user("owner")
+        assert admin is not None and admin["role"] == "admin"
     finally:
         context.close()
         live.stop()
 
 
-def test_change_credentials_in_settings(page: Page, server: LiveServer) -> None:
+def test_change_password_and_profile_in_settings(page: Page, server: LiveServer) -> None:
     page.click("#navSettings")
-    expect(page.locator("#accountUsername")).to_have_value(TEST_USER)
-    page.fill("#accountUsername", "trader")
+    expect(page.locator("#profileSummary")).to_contain_text(f"Signed in as {TEST_USER} (administrator)")
+    # Profile: e-mail + per-user auto-trading switch.
+    page.fill("#profileEmail", "admin@example.com")
+    page.locator("label.switch:has(#profileAutoTrade)").click()
+    page.click("#profileSaveButton")
+    expect(page.locator("#profileStatus")).to_contain_text("Profile saved")
+    user = server.engine.storage.find_user(TEST_USER)
+    assert user is not None and user["email"] == "admin@example.com" and not user["auto_trade"]
+    assert server.engine.accounts.is_enabled(TEST_USER) is False
+
+    # Password change with live requirement feedback.
     page.fill("#accountCurrentPassword", "not the password")
-    page.fill("#accountNewPassword", "brand new password")
-    page.fill("#accountConfirmPassword", "brand new password")
+    page.type("#accountNewPassword", "weak")
+    rules = page.locator("#accountPasswordFeedback .pw-rules li")
+    expect(rules.filter(has_text="At least 10")).to_have_class(re.compile(r"failed"))
+    page.click("#accountSaveButton")
+    expect(page.locator("#accountStatus")).to_contain_text("Password requirements not met")
+    page.fill("#accountNewPassword", "Brand-new-pass2!")
+    expect(page.locator("#accountPasswordFeedback")).to_have_class(re.compile(r"all-passed"))
+    page.fill("#accountConfirmPassword", "Brand-new-pass2!")
     page.click("#accountSaveButton")
     expect(page.locator("#accountStatus")).to_contain_text("Current password is incorrect")
     page.fill("#accountCurrentPassword", TEST_PASSWORD)
     page.click("#accountSaveButton")
-    expect(page.locator("#accountStatus")).to_contain_text("Credentials updated")
-    expect(page.locator("#userName")).to_have_text("trader")
-    saved = AppConfig.load(server.config_path)
-    assert saved.web.username == "trader"
+    expect(page.locator("#accountStatus")).to_contain_text("Password changed")
+    expect(page.locator("#userName")).to_have_text(TEST_USER)
     # Still signed in with the renewed session; the app keeps working.
     page.click("#navDashboard")
     page.click("#refreshButton")
     expect(page.locator("#chartStatusLabel")).to_contain_text("data as of")
+    # The new password works, and so does signing in with the e-mail address.
+    page.click("#logoutButton")
+    page.wait_for_url("**/login")
+    page.fill("#usernameInput", "Admin@Example.com")
+    page.fill("#passwordInput", "Brand-new-pass2!")
+    page.click("#loginButton")
+    page.wait_for_url(server.url)
+    expect(page.locator("#userName")).to_have_text(TEST_USER)
+
+
+def verification_link(data_dir: Path) -> str:
+    """The verification URL from the newest message in the outbox folder."""
+    files = sorted((data_dir / "outbox").glob("*.eml"), key=lambda f: f.stat().st_mtime)
+    assert files, "no verification e-mail was written"
+    message = email.message_from_bytes(files[-1].read_bytes())
+    body = message.get_payload(decode=True)
+    assert isinstance(body, bytes)
+    match = re.search(r"https?://\S+/verify\?token=[\w-]+", body.decode())
+    assert match, body
+    return match.group(0)
+
+
+def test_signup_with_email_verification(browser: Browser, tmp_path: Path) -> None:
+    """Logout -> Create account -> verification e-mail (outbox transport) -> sign in with the e-mail address."""
+    live = start_live_server(write_project(tmp_path, notifications={"desktop": False, "sound": False,
+                                                                   "email": {"transport": "outbox", "sender": "bot@example.com"}}))
+    context = browser.new_context(viewport={"width": 1440, "height": 900})
+    try:
+        page = context.new_page()
+        login(page, live.url)
+        page.click("#logoutButton")
+        page.wait_for_url("**/login")
+        page.click("#signupLink")
+        page.wait_for_url("**/signup")
+        expect(page).to_have_title(re.compile("Create account"))
+        expect(page.locator("#emailLabel")).to_have_text("E-mail")  # verification is on -> e-mail required
+        expect(page.locator("#emailInput")).to_have_attribute("required", "")
+
+        page.fill("#usernameInput", "bob")
+        page.fill("#emailInput", "Bob@Example.com")
+        rules = page.locator("#passwordFeedback .pw-rules li")
+        page.type("#passwordInput", "bobbob")
+        expect(rules.filter(has_text="username")).to_have_class(re.compile(r"failed"))
+        page.fill("#passwordInput", "Sunny-Trail-42!")
+        expect(page.locator("#passwordFeedback")).to_have_class(re.compile(r"all-passed"))
+        page.locator("#passwordInput ~ .pw-toggle").click()
+        expect(page.locator("#passwordInput")).to_have_attribute("type", "text")
+        page.fill("#confirmInput", "Sunny-Trail-42!")
+        page.click("#signupButton")
+        expect(page.locator("#verifyPanel")).to_be_visible()
+        expect(page.locator("#verifyText")).to_contain_text("bob@example.com")
+
+        # Not verified yet: login is refused with a hint and a resend button.
+        page.goto(live.url + "login")
+        page.fill("#usernameInput", "bob")
+        page.fill("#passwordInput", "Sunny-Trail-42!")
+        page.click("#loginButton")
+        expect(page.locator("#loginError")).to_contain_text("verify your e-mail")
+        expect(page.locator("#resendButton")).to_be_visible()
+        page.click("#resendButton")
+        expect(page.locator("#loginNotice")).to_contain_text("new link has been sent")
+        assert len(list((tmp_path / "bot_data" / "outbox").glob("*.eml"))) == 2
+
+        # Following the link in the e-mail activates the account.
+        page.goto(verification_link(tmp_path / "bot_data"))
+        page.wait_for_url("**/login?verified=1")
+        expect(page.locator("#loginNotice")).to_contain_text("verified")
+        page.fill("#usernameInput", "bob@example.com")  # e-mail works as login identifier
+        page.fill("#passwordInput", "Sunny-Trail-42!")
+        page.click("#loginButton")
+        page.wait_for_url(live.url)
+        expect(page.locator("#userName")).to_have_text("bob")
+        expect(page.locator("#userAvatar")).to_have_text("B")
+        # Bob has his own paper account and is not an administrator.
+        page.click("#navPositions")
+        expect(page.locator("#positionsAccountName")).to_contain_text("bob")
+        expect(page.locator("#accountCash")).to_have_text("50,000.00")
+        page.click("#navSettings")
+        expect(page.locator("#aiSettingsCard")).to_be_hidden()
+        expect(page.locator("#profileSummary")).not_to_contain_text("administrator")
+    finally:
+        context.close()
+        live.stop()
+
+
+def seed_trades(server: LiveServer, account: str = TEST_USER) -> None:
+    """Write a deterministic set of round-trip fills for ``account``."""
+    start = datetime(2024, 3, 4, 15, 0, tzinfo=UTC)
+    legs = [("AAPL", "MA Crossover", 10, 100.0, 106.0), ("MSFT", "MA Crossover", 5, 300.0, 294.0),
+            ("AAPL", "Always Buy", 10, 106.0, 110.0), ("NVDA", "Always Buy", 2, 800.0, 790.0),
+            ("MSFT", "MA Crossover", 5, 294.0, 301.0)]
+    when = start
+    for symbol, strategy, qty, entry, exit_ in legs:
+        server.engine.storage.record_fill(Fill(symbol, "BUY", qty, entry, when, strategy), account)
+        when += timedelta(hours=5)
+        server.engine.storage.record_fill(Fill(symbol, "SELL", qty, exit_, when, strategy, (exit_ - entry) * qty), account)
+        when += timedelta(hours=20)
+
+
+def test_history_page_shows_trades_and_pnl_chart(page: Page, server: LiveServer) -> None:
+    seed_trades(server)
+    page.click("#navHistory")
+    kpis = page.locator("#historyKpis .kpi")
+    expect(kpis).to_have_count(7)
+    expect(kpis.nth(0)).to_contain_text("+85.00")      # 60 - 30 + 40 - 20 + 35
+    expect(kpis.nth(1)).to_contain_text("5")
+    expect(kpis.nth(1)).to_contain_text("3 wins · 2 losses")
+    expect(kpis.nth(2)).to_contain_text("60.0%")
+    expect(page.locator("#historySubtitle")).to_contain_text("5 closed trades")
+    rows = page.locator("#closedTradesTable tbody tr")
+    expect(rows).to_have_count(5)
+    expect(rows.first).to_contain_text("MSFT")          # newest first
+    expect(rows.first.locator("td").nth(7)).to_have_text("+35.00")
+    expect(rows.first.locator("td").nth(7)).to_have_class(re.compile(r"up"))
+    expect(page.locator("#historyFillsTable tbody tr")).to_have_count(10)
+    # The P&L curve is painted (the account stays above zero, so the line is green).
+    colours = canvas_colors(page, "#pnlCanvas")
+    assert UP_RGB in colours, colours
+    assert page.evaluate("document.querySelector('#pnlCanvas').width") > 0
+
+
+def test_insights_page_renders_analytics(page: Page, server: LiveServer) -> None:
+    seed_trades(server)
+    page.click("#navInsights")
+    expect(page.locator("#insightsKpis .kpi")).to_have_count(7)
+    expect(page.locator("#insightsSubtitle")).to_contain_text("5 closed trades")
+    insights = page.locator("#insightList .insight")
+    expect(insights.filter(has_text="Small sample")).to_have_count(1)
+    expect(insights.first).to_have_class(re.compile(r"insight (good|info|warning)"))
+    strategies = page.locator("#byStrategyTable tbody tr")
+    expect(strategies).to_have_count(2)
+    expect(strategies.first.locator("td").first).to_have_text("MA Crossover")   # sorted by P&L: 60-30+35 = 65 first
+    expect(strategies.first.locator("td").nth(3)).to_have_text("+65.00")
+    expect(page.locator("#bySymbolTable tbody tr")).to_have_count(3)
+    expect(page.locator("#byWeekdayTable tbody tr").first).to_contain_text(re.compile(r"day"))
+    # No LLM configured: the button is disabled and the note tells the admin where to configure it.
+    expect(page.locator("#aiAnalyzeButton")).to_be_disabled()
+    expect(page.locator("#aiNote")).to_contain_text("Settings")
 
 
 def test_missing_api_key_banner_and_demo_switch(browser: Browser, tmp_path: Path) -> None:
@@ -472,3 +686,200 @@ def test_missing_api_key_banner_and_demo_switch(browser: Browser, tmp_path: Path
     finally:
         context.close()
         live.stop()
+
+
+# ------------------------------------------------- trade / wallet / fx pages
+
+
+@pytest.fixture
+def funded_server(tmp_path: Path) -> Iterator[LiveServer]:
+    """Server with the demo FX provider, the sandbox payment provider and a realistic execution model."""
+    live = start_live_server(write_project(tmp_path, fx={"provider": "demo"},
+                                           execution={"slippage_model": "fixed", "slippage_bps": 10, "commission_per_order": 1.0}))
+    yield live
+    live.stop()
+
+
+@pytest.fixture
+def funded_page(browser: Browser, funded_server: LiveServer) -> Iterator[Page]:
+    context = browser.new_context(viewport={"width": 1440, "height": 900})
+    page = context.new_page()
+    errors: list[str] = []
+    page.on("pageerror", lambda err: errors.append(str(err)))
+    page.on("console", lambda msg: errors.append(msg.text) if msg.type == "error" and not any(k in msg.text for k in IGNORED_CONSOLE) else None)
+    login(page, funded_server.url)
+    yield page
+    context.close()
+    assert not errors, f"browser console errors: {errors}"
+
+
+def test_trade_page_simulate_place_and_close(funded_page: Page, funded_server: LiveServer) -> None:
+    page = funded_page
+    page.click("#navTrade")
+    expect(page.locator("#tradeBrokerLabel")).to_have_text("Paper account (simulated)")
+    expect(page.locator("#tradePositionsTable tbody tr.empty")).to_be_visible()
+    page.fill("#orderSymbolInput", "AAPL")
+    page.fill("#orderQuantityInput", "15")
+    page.fill("#orderStopInput", "5")
+    page.click("#simulateOrderButton")
+    expect(page.locator("#simulationResult")).to_be_visible()
+    expect(page.locator("#simulationVerdict")).to_contain_text("BUY 15 AAPL would fill @")
+    expect(page.locator("#simulationModel")).to_contain_text("fixed")
+    table = page.locator("#simulationTable")
+    expect(table).to_contain_text("Commission")
+    expect(table).to_contain_text("1.00")
+    expect(table).to_contain_text("Stop loss")
+    assert funded_server.engine.broker.position("AAPL") is None  # simulation only
+
+    # Place it (confirmation dialog), the position appears with the manual strategy tag.
+    page.click("#placeOrderButton")
+    expect(page.locator("#confirmDialog")).to_be_visible()
+    expect(page.locator("#confirmText")).to_contain_text("BUY 15 shares of AAPL at market")
+    page.click("#confirmOkButton")
+    expect(page.locator("#orderStatus")).to_contain_text("BUY 15 AAPL filled @")
+    rows = page.locator("#tradePositionsTable tbody tr")
+    expect(rows).to_have_count(1)
+    expect(rows.first).to_contain_text("AAPL")
+    expect(rows.first).to_contain_text("manual")
+    position = funded_server.engine.broker.position("AAPL")
+    assert position is not None and position.quantity == 15 and position.stop_loss is not None
+
+    # A non-marketable limit order rests in the pending table and can be cancelled.
+    page.select_option("#orderTypeSelect", "limit")
+    page.fill("#orderSymbolInput", "MSFT")
+    page.fill("#orderQuantityInput", "2")
+    page.fill("#orderLimitInput", "1")
+    page.click("#simulateOrderButton")
+    expect(page.locator("#simulationVerdict")).to_contain_text("Would rest as a limit order")
+    expect(page.locator("#simulationWarnings li").first).to_contain_text("not marketable")
+    page.click("#placeOrderButton")
+    page.click("#confirmOkButton")
+    expect(page.locator("#orderStatus")).to_contain_text("Limit order placed")
+    pending = page.locator("#tradePendingTable tbody tr")
+    expect(pending).to_have_count(1)
+    expect(pending.first).to_contain_text("MSFT")
+    pending.first.locator("button.cancel-order").click()
+    expect(page.locator("#tradePendingTable tbody tr.empty")).to_be_visible()
+
+    # Rejections are explained inline.
+    page.select_option("#orderTypeSelect", "market")
+    page.fill("#orderSymbolInput", "AAPL")
+    page.click("#orderSideSell", force=True)
+    page.fill("#orderQuantityInput", "99")
+    page.click("#simulateOrderButton")
+    expect(page.locator("#simulationVerdict")).to_have_class(re.compile(r"rejected"))
+    expect(page.locator("#simulationVerdict")).to_contain_text("only 15 held")
+
+    # Close the position from the table.
+    page.locator("#tradePositionsTable tbody tr").first.locator("button.close-position").click()
+    expect(page.locator("#confirmTitle")).to_have_text("Close AAPL?")
+    page.click("#confirmOkButton")
+    expect(page.locator("#tradePositionsTable tbody tr.empty")).to_be_visible(timeout=10000)
+    assert funded_server.engine.broker.position("AAPL") is None
+    # Positions page shows the same data with a close button column; the ledger has both legs.
+    page.click("#navWallet")
+    expect(page.locator("#transactionsTable tbody tr")).to_have_count(2)
+    expect(page.locator("#transactionsTable tbody tr").first.locator(".pill").first).to_have_text("sell")
+
+
+def test_wallet_deposit_via_sandbox_checkout_and_withdraw(funded_page: Page, funded_server: LiveServer) -> None:
+    page = funded_page
+    page.click("#navWallet")
+    kpis = page.locator("#walletKpis .kpi")
+    expect(kpis).to_have_count(6)
+    expect(kpis.nth(0)).to_contain_text("50,000.00")
+    expect(page.locator("#depositProviderLabel")).to_contain_text("sandbox")
+    page.fill("#depositAmountInput", "200")
+    page.select_option("#depositCurrencySelect", "EUR")
+    expect(page.locator("#depositQuote")).to_contain_text("≈")
+    expect(page.locator("#depositQuote")).to_contain_text("USD/EUR")
+    page.click("#depositButton")
+    page.wait_for_url("**/pay/mock/**")
+    expect(page).to_have_title(re.compile("Sandbox checkout"))
+    expect(page.locator("#paySummary")).to_contain_text("€200.00")
+    expect(page.locator("#payButtonLabel")).to_have_text("Pay €200.00")
+    page.click("#payButton")
+    page.wait_for_url(re.compile(r".*#wallet$"))
+    expect(page.locator("#walletNotice")).to_contain_text("Deposit of")
+    expect(page.locator("#walletNotice")).to_contain_text("received")
+    cash = funded_server.engine.broker.cash()
+    assert 50_200 < cash < 50_260  # 200 EUR converted at the demo rate
+    expect(page.locator("#walletKpis .kpi").nth(0)).to_contain_text(f"{cash:,.2f}")
+    rows = page.locator("#transactionsTable tbody tr")
+    expect(rows).to_have_count(1)
+    expect(rows.first).to_contain_text("deposit")
+    expect(rows.first).to_contain_text("(200.00 EUR)")
+    expect(rows.first).to_contain_text("completed")
+
+    # Cancelling on the checkout page leaves a cancelled entry and no money moves.
+    page.fill("#depositAmountInput", "50")
+    page.select_option("#depositCurrencySelect", "USD")
+    page.click("#depositButton")
+    page.wait_for_url("**/pay/mock/**")
+    page.click("#cancelButton")
+    page.wait_for_url(re.compile(r".*#wallet$"))
+    expect(page.locator("#walletNotice")).to_contain_text("cancelled")
+    assert funded_server.engine.broker.cash() == pytest.approx(cash)
+
+    # Withdraw part of the cash.
+    page.fill("#withdrawAmountInput", "1000")
+    page.fill("#withdrawDestinationInput", "DE89 3704 0044 0532 0130 00")
+    page.click("#withdrawButton")
+    page.click("#confirmOkButton")
+    expect(page.locator("#withdrawStatus")).to_contain_text("completed")
+    assert funded_server.engine.broker.cash() == pytest.approx(cash - 1000)
+    expect(page.locator("#transactionsTable tbody tr")).to_have_count(3)
+    expect(page.locator("#transactionsTable tbody tr").first).to_contain_text("withdrawal")
+    page.select_option("#txKindFilter", "deposit")
+    expect(page.locator("#transactionsTable tbody tr")).to_have_count(2)
+    expect(page.locator("#txExportLink")).to_have_attribute("href", re.compile(r"kind=deposit.*format=csv"))
+
+
+def test_fx_page_rates_chart_and_converter(funded_page: Page) -> None:
+    page = funded_page
+    page.click("#navFx")
+    expect(page.locator("#fxSubtitle")).to_contain_text("demo")
+    rows = page.locator("#fxTable tbody tr")
+    expect(rows).to_have_count(12)  # default quote currencies
+    expect(rows.filter(has_text="EUR")).to_contain_text("Euro")
+    expect(page.locator("#fxChartTitle")).to_have_text("USD/EUR")
+    expect(page.locator("#fxChartStats")).to_contain_text("over 90 days")
+    colours = canvas_colors(page, "#fxCanvas")
+    assert UP_RGB in colours or DOWN_RGB in colours, colours
+    page.locator("#fxTable tbody tr", has_text="JPY").click()
+    expect(page.locator("#fxChartTitle")).to_have_text("USD/JPY")
+    page.locator("#fxRangeGroup label", has_text="1Y").click()
+    expect(page.locator("#fxChartStats")).to_contain_text("over 365 days")
+    page.select_option("#fxBaseSelect", "EUR")
+    expect(page.locator("#fxChartTitle")).to_have_text("EUR/USD")
+    expect(page.locator("#fxTable tbody tr", has_text="USD")).to_be_visible()
+    page.fill("#convertAmountInput", "250")
+    page.select_option("#convertFromSelect", "EUR")
+    page.select_option("#convertToSelect", "USD")
+    page.click("#convertButton")
+    expect(page.locator("#convertResult")).to_contain_text("250.00 EUR =")
+    expect(page.locator("#convertDetail")).to_contain_text("1 EUR =")
+    page.click("#convertSwapButton")
+    expect(page.locator("#convertFromSelect")).to_have_value("USD")
+    expect(page.locator("#convertToSelect")).to_have_value("EUR")
+
+
+def test_broker_connection_card_in_settings(funded_page: Page) -> None:
+    page = funded_page
+    page.click("#navSettings")
+    expect(page.locator("#brokerCurrent")).to_contain_text("paper account")
+    expect(page.locator("#brokerCredentialFields")).to_be_hidden()
+    page.select_option("#brokerProviderSelect", "alpaca")
+    expect(page.locator("#brokerCredentialFields")).to_be_visible()
+    expect(page.locator("#brokerProviderNote")).to_contain_text("Alpaca")
+    page.click("#brokerSaveButton")  # no credentials entered
+    expect(page.locator("#brokerStatus")).to_contain_text("API key and secret are required")
+    page.select_option("#brokerProviderSelect", "paper")
+    expect(page.locator("#brokerSaveButton")).to_have_text("Use paper account")
+    # Admin-only execution / payments cards are present for the administrator.
+    expect(page.locator("#executionSettingsCard")).to_be_visible()
+    expect(page.locator("#settingsSlippageModel")).to_have_value("fixed")
+    expect(page.locator("#settingsPaymentsProvider")).to_have_value("mock")
+    expect(page.locator("#stripeFields")).to_be_hidden()
+    page.select_option("#settingsPaymentsProvider", "stripe")
+    expect(page.locator("#stripeFields")).to_be_visible()

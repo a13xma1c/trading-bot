@@ -47,14 +47,38 @@ over a WebSocket.
   Signals are de-duplicated per bar and persisted in SQLite, so restarting never
   re-sends old alerts.
 * **Paper trading** with stop-loss / take-profit monitoring, position sizing and
-  a `Broker` interface for plugging in a real broker.
+  a `Broker` interface for plugging in a real broker. **Multi-user**: people can
+  sign up themselves (optionally with e-mail verification), every user gets an
+  independent paper account and decides whether signals are executed in it.
+* **Manual trading & broker connection**: an order ticket (market / limit,
+  stop-loss / take-profit, cash-based sizing) to add or close positions in your
+  own account, resting limit orders, and a per-user **broker connection** —
+  route orders and auto-traded signals to **Alpaca** (paper or live) instead of
+  the built-in paper account through the pluggable `Broker` interface.
+* **Execution simulation**: every order can be dry-run first — expected fill
+  after slippage (fixed half-spread or square-root market-impact model),
+  commissions, resulting cash/position, feasibility warnings. The same model
+  prices the paper account's fills so the P&L history already includes costs.
+* **Wallet**: add or withdraw money through a **payment provider** (built-in
+  sandbox checkout or **Stripe Checkout** + webhooks), deposits in any currency
+  converted at the current rate, and a full **transaction ledger** (deposits,
+  withdrawals, trades, fees, running balance) with filters and CSV export.
+* **Exchange rates** page: live rate table (ECB reference rates via
+  Frankfurter, no key needed), historical chart per pair and a converter.
+* **Trade history & analytics**: per-user fill and closed-trade history with a
+  cumulative P&L chart, performance statistics (win rate, profit factor,
+  expectancy, drawdown, streaks), breakdowns by strategy / symbol / hour /
+  weekday, rule-based insights and — with any OpenAI-compatible endpoint
+  configured — an **AI-generated written assessment**.
 * **Backtester** (next-open fills, intrabar stop/target, commissions) with
   equity curve, trade list and summary statistics.
 * **REST + WebSocket API** (`/api/docs`), optional API token, headless mode
   for servers (`trading-bot run`) plus `scan`, `backtest` and `check` commands.
-* **Test suite**: ~200 fully typed tests covering indicators, the rule language
+* **Test suite**: ~290 fully typed tests covering indicators, the rule language
   (including sandbox escapes), providers (recorded API payloads), rate limiting,
-  engine, broker, backtester, notifications, config migration, CLI, the HTTP /
+  engine, brokers (paper + a fake Alpaca API), execution simulation, payments
+  (sandbox + Stripe signatures/webhooks), FX, backtester, analytics,
+  notifications, user accounts and e-mail, config migration, CLI, the HTTP /
   WebSocket API and end-to-end browser tests (Playwright).
 
 ## Installation
@@ -74,25 +98,58 @@ python -m trading_bot
 
 The server binds to `127.0.0.1:8080` by default.
 
-### Login
+### Login, accounts and sign-up
 
-The web UI requires a login. On the very first start no password exists yet,
+The web UI requires a login. On the very first start no account exists yet,
 so the browser shows a **first-run setup page** where you create the
-administrator account and can optionally choose the market-data provider and
-enter its API key (both can be changed later under *Settings*); alternatively
-set the password from the command line:
+administrator account (username, optional e-mail, password) and can optionally
+choose the market-data provider and enter its API key (both can be changed
+later under *Settings*). Alternatively set the administrator password from the
+command line or the environment — this also **resets** a forgotten password at
+the next start:
 
 ```bash
 uv run trading-bot set-password --username admin      # prompts for the password
 TRADING_BOT_WEB_PASSWORD=... uv run trading-bot serve # or supply it via the environment (containers)
 ```
 
-Passwords are stored as PBKDF2-SHA256 hashes in `config.json` (`web.username`,
-`web.password_hash`). Sessions use an HttpOnly cookie and expire after
-`web.session_hours`; five failed logins lock the client out for a minute. You
-can change the credentials under *Settings → Account* (all other sessions are
-signed out). Scripts can authenticate with a bearer token instead
-(`web.token` / `TRADING_BOT_WEB_TOKEN`, `Authorization: Bearer <token>`).
+Passwords must have at least 10 characters with lower- and uppercase letters, a
+digit and a symbol, must not contain the username and must not be a commonly
+used password; every password form checks these live while you type (the
+server enforces the same rules) and has a *reveal* (eye) button. Accounts are
+stored in the SQLite database (`bot_data/history.sqlite3`, PBKDF2-SHA256
+hashes). Sessions use an HttpOnly cookie bound to the password hash and expire
+after `web.session_hours`; five failed logins lock the client out for a
+minute. Users sign in with their **username or e-mail address**. Scripts can
+authenticate with a bearer token instead (`web.token` /
+`TRADING_BOT_WEB_TOKEN`, `Authorization: Bearer <token>`); the token acts as the
+administrator.
+
+**Sign-up.** After logging out (or on the login page) visitors can *Create
+account* while `web.allow_signup` is on (default; administrators toggle it
+under *Settings → Sign-up & e-mail*). New users get their own paper account
+with `trading.initial_cash`, see only their own positions, fills and
+analytics, and choose under *Settings → My account* whether signals are
+executed in their account ("auto-trade"). Strategies, the watchlist and the
+market-data connection are shared.
+
+**E-mail verification** (`web.email_verification`):
+
+| Value | Behaviour |
+| --- | --- |
+| `auto` (default) | Required when e-mail delivery is configured, otherwise accounts are active immediately |
+| `required` | Always required (sign-up is refused until e-mail delivery works) |
+| `off` | Never |
+
+A verification link (valid for 24 hours) is sent through
+`notifications.email`: `transport: "smtp"` uses the SMTP settings (host, port,
+user, password — `TRADING_BOT_SMTP_PASSWORD` —, sender, TLS);
+`transport: "outbox"` writes `.eml` files into `bot_data/outbox/` instead,
+which is handy for trying the flow without a mail server. Until the link is
+opened the login page refuses the account with a *Resend verification e-mail*
+button. Set `web.public_url` (e.g. `https://bot.example.com`) when the bot
+runs behind a proxy so the links carry the right address. Administrators can
+list users at `GET /api/users`.
 
 To reach the UI from other machines set `web.host` (e.g. `0.0.0.0`) and put a
 TLS-terminating reverse proxy in front of it for anything but a private
@@ -143,7 +200,7 @@ application can be explored offline (and the test-suite runs against it).
 | `trading-bot scan` | One scan, print new signals as JSON, exit |
 | `trading-bot backtest AAPL [--strategy NAME] [--bars 1000]` | Backtest strategies on one symbol |
 | `trading-bot check` | Validate config and strategies |
-| `trading-bot set-password [--username U] [--password P]` | Set the web login (hashed into the config file) |
+| `trading-bot set-password [--username U] [--password P]` | Set / reset the administrator password (applied at the next start) |
 | `--config path` | Use another config file (default `config.json`) |
 
 Use `python -m trading_bot …` if the console script is not on your `PATH`.
@@ -159,8 +216,10 @@ Use `python -m trading_bot …` if the console script is not on your `PATH`.
   refreshes just the charted symbol. A symbol whose last fetch failed shows
   *error* in red in the watchlist (hover for the reason) and in the chart
   status line; cached data keeps being served meanwhile.
-* **Dashboard** – watchlist (add with Enter, click a row to chart it, × to
-  remove), candlestick chart with an *Overlay strategy* selector that draws a
+* **Dashboard** – watchlist with ticker suggestions while you type (symbol +
+  company name from a bundled directory of major US stocks and ETFs — instant
+  and free; an explicit *Search provider* row queries the data provider at the
+  cost of one API request), click a row to chart it, × to remove; candlestick chart with an *Overlay strategy* selector that draws a
   strategy's indicators and marks where it would have fired, and the signal
   list. New signals show a snackbar, an optional browser notification and a
   sound.
@@ -169,20 +228,61 @@ Use `python -m trading_bot …` if the console script is not on your `PATH`.
   *Show on chart*, *Backtest…* (stats, equity curve, trade list; trades can be
   marked on the chart). The switch in the list enables a strategy for live
   scanning.
-* **Positions** – paper-broker account, open positions with P&L, stops and
-  targets, fills; reset button.
+* **Positions** – *your* account (cash, equity, venue, auto-trade state), open
+  positions with P&L, stops and targets (× closes a position at market),
+  resting orders, recent fills; reset button for the paper account.
+* **Trade** – order ticket: symbol (with suggestions), buy/sell, quantity *or*
+  cash amount, market or limit, optional stop-loss / take-profit %. **Simulate**
+  shows the expected fill price after slippage, commission, cash and position
+  after the trade, realized P&L for sells and warnings (cash usage, share of
+  average volume, non-marketable limit) — nothing is sent. **Place order**
+  executes in your account after a confirmation (live brokerage orders are
+  flagged). Limit orders that are not marketable rest until a bar trades
+  through the limit (paper) or at the brokerage; cancel them from the table.
+* **Wallet** – balance KPIs, **Add money** (amount + currency with a live
+  conversion quote → payment provider checkout → back to the wallet with the
+  result), **Withdraw** (only uninvested, unreserved cash), and the
+  **transaction ledger** with type/period filters and *Export CSV*.
+* **FX** – exchange-rate table for a chosen base currency, history chart
+  (1M / 3M / 1Y / 5Y) for the selected pair and a converter.
+* **History** – KPI cards (realized P&L, closed trades, win rate, profit
+  factor, expectancy, max drawdown, average holding time), a **cumulative P&L
+  chart** (green above / red below zero, one dot per closed trade), the list of
+  closed trades (entry/exit, return %, holding time — sells are matched to
+  buys FIFO) and every fill of your account.
+* **Insights** – the same statistics plus rule-based observations ("'X' is the
+  weakest strategy", "losses are larger than wins", weak hours, streaks …),
+  breakdown tables by strategy, symbol, hour of exit and weekday, and a
+  **Generate analysis** button that asks the configured LLM for a written
+  assessment (see [AI insights](#ai-insights)).
 * **Settings** – provider, API key, interval, budget, market hours,
-  notifications, trading, account credentials. Changes are applied live;
-  provider / key / budget changes rebuild the data connection on the spot.
+  notifications, trading; *My account* (e-mail, auto-trade switch, password
+  change); *Broker connection* (paper account or your Alpaca keys, verified
+  before saving); for administrators also *Execution simulation* (slippage /
+  commission model), *Payments & exchange rates* (provider, account currency,
+  limits, Stripe keys, FX provider), *AI insights* and *Sign-up & e-mail*
+  (sign-up on/off, verification policy, public URL, SMTP / outbox transport).
+  Changes are applied live; provider / key / budget changes rebuild the data
+  connection on the spot.
 
 ### HTTP API
 
 Everything the UI does is available at `/api/*` (interactive docs at
 `/api/docs`): status and engine control, watchlist, bars and overlays,
-strategies (validate / save / enable / delete), backtests, signals, positions,
-settings, plus `/api/auth/*` (status, setup, login, logout, password). `/ws`
+strategies (validate / save / enable / delete), backtests, signals, positions
+(`DELETE /api/positions/{symbol}` closes one), orders (`POST /api/orders/simulate`,
+`POST /api/orders`, `GET/DELETE /api/orders`), broker connection
+(`GET/PUT /api/broker/connection`, `/api/broker/providers`), wallet
+(`/api/wallet`, `/deposit`, `/withdraw`, `/deposits/{id}/sync`, `/quote`),
+transactions (`/api/transactions?kind=&status=&days=&format=csv`), payments
+(`POST /api/payments/webhook`, sandbox `/api/payments/mock/*`), FX
+(`/api/fx/latest|history|convert|currencies`), history (`/api/history`),
+analytics (`/api/analytics`, `POST /api/analytics/ai`), settings, users
+(`/api/users`, admin) plus `/api/auth/*` (status, setup, signup,
+resend-verification, login, logout, password, me, profile) and
+`/verify?token=` for e-mail links. `/ws`
 streams events (`bars`, `signal`, `scan`, `fetch_failed`, `engine`,
-`positions`, `status`) as JSON. Requests are authenticated by the session
+`positions`, `order`, `wallet`, `status`) as JSON. Requests are authenticated by the session
 cookie or, for scripts, `Authorization: Bearer <token>` (`?token=` for the
 WebSocket).
 
@@ -259,6 +359,131 @@ strategies and can be enabled/disabled there.
 A signal is identified by *(strategy, symbol, action, bar time)*; the same
 signal is never notified twice, even across restarts.
 
+## Trading: manual orders, brokers and execution simulation
+
+### Order ticket and position management
+
+Besides acting on strategy signals, every user can **add or remove positions**
+by hand on the *Trade* page (or `POST /api/orders`): market or limit orders,
+sized in shares or in cash, with optional stop-loss / take-profit percentages
+that the engine then monitors like for automatic entries. `× Close` on a
+position (`DELETE /api/positions/{symbol}`) sells it at the current price.
+Manual fills appear in the fill history, the transaction ledger and the
+analytics like any other trade (strategy `manual`).
+
+Limit orders that cannot fill immediately **rest**: in the paper account they
+are checked against every new bar (a buy fills when the bar's low trades
+through the limit, a sell when the high does) and optionally expire after
+`execution.limit_order_expiry_bars`; at a connected brokerage they rest there.
+Cash needed by resting buy orders is reserved — it cannot be withdrawn or spent
+by another limit order.
+
+### Execution simulation
+
+*Simulate* (`POST /api/orders/simulate`) dry-runs an order against the
+account's current cash and positions using recent bars:
+
+| Setting (`execution.*`) | Meaning |
+| --- | --- |
+| `slippage_model` | `none` (fill at the last price), `fixed` (half-spread of `slippage_bps` against the trader), `volume` (fixed + square-root market impact: `impact_coefficient × volatility × √(quantity / average bar volume)`) |
+| `commission_per_order`, `commission_per_share`, `commission_pct`, `min_commission` | Commission schedule |
+| `max_participation_pct` | Warn when an order exceeds this share of the average bar volume |
+| `limit_order_expiry_bars` | Resting paper limit orders expire after this many bars (0 = never) |
+
+The result lists the expected fill price, slippage cost, commission, cash and
+position after the trade, the realized P&L of a sell, stop/target levels and
+warnings (insufficient cash, position too small, non-marketable limit, heavy
+participation, high commission ratio, more positions than
+`trading.max_positions`). The **same model prices every paper fill** — automatic
+signals, manual orders and resting limit orders — so the paper P&L is net of
+realistic costs. The defaults (`none`, no commissions) reproduce idealised
+fills; `config.demo.json` enables the volume model with a 1.00 commission.
+
+### Connecting a brokerage (Alpaca)
+
+Each user chooses their execution venue under *Settings → Broker connection*
+(`PUT /api/broker/connection`): the built-in paper account or **Alpaca**
+(`provider: alpaca`, API key + secret, paper/live switch). Credentials are
+verified against the brokerage before they are saved (a typo never leaves the
+account without a venue) and stored in the bot's database — protect `bot_data/`
+accordingly and prefer Alpaca's *paper* keys until you trust the setup.
+With a brokerage connected:
+
+* manual orders and auto-traded signals (if *auto-trade* is on) are sent to it
+  — market orders as `day` orders, stops/targets as bracket legs, limit orders
+  as `gtc`; fills are polled for up to 10 s and then recorded;
+* positions, cash and equity on *Positions* / *Trade* / *Wallet* come from the
+  brokerage; protective exits are left to the bracket orders;
+* deposits and withdrawals are disabled (fund the account at the broker);
+* the fill history and ledger are still kept locally for History / Insights.
+
+Other brokerages can be added by implementing `trading_bot.broker.Broker`
+(`submit_market_order`, `positions`, `cash`, optionally `submit_limit_order`,
+`pending_orders`, `cancel_order`, `close_position`, `test_connection`) and
+registering it in `trading_bot/brokers/__init__.py`.
+
+## Wallet: deposits, withdrawals and the transaction ledger
+
+Paper accounts can be funded and drained through a **payment provider**
+(`payments.provider`):
+
+| Provider | Behaviour |
+| --- | --- |
+| `mock` (default) | Built-in sandbox: *Add money* redirects to a local checkout page (`/pay/mock/<session>`) where the payment is confirmed or cancelled; payouts are paid instantly. Perfect for demos and tests — no real money. |
+| `stripe` | Creates a [Stripe Checkout](https://stripe.com/docs/payments/checkout) session and redirects to Stripe; the account is credited when the `checkout.session.completed` webhook arrives at `POST /api/payments/webhook` (signature verified with `payments.stripe.webhook_secret`) or when the session is found paid on return. Withdrawals create Stripe payouts (`payout.paid` / `payout.failed` webhooks complete or refund them). Keys: `payments.stripe.secret_key` / `TRADING_BOT_STRIPE_SECRET_KEY`, `webhook_secret` / `TRADING_BOT_STRIPE_WEBHOOK_SECRET`. |
+| `none` | Funding disabled (the wallet page still shows the ledger). |
+
+Deposits may be made in any currency the FX provider knows: the amount is
+converted into the account currency (`payments.currency`) at the current rate,
+the original amount and rate are kept on the ledger entry, and the wallet shows
+a live quote while typing. `payments.min_amount` / `max_amount` bound every
+deposit and withdrawal. Only uninvested cash that is not reserved by resting
+buy orders can be withdrawn; a failed payout refunds the account.
+
+Every cash movement is recorded in the **transaction ledger** (`GET
+/api/transactions`, *Wallet → Transactions*): deposits, withdrawals, buys and
+sells (with commission, symbol, quantity, price and the fill id as reference),
+each with a status (`pending`, `completed`, `failed`, `cancelled`) and the
+running balance. Filter by type, status or period, or download it as CSV.
+Amount mismatches and replayed webhooks are detected and ignored.
+
+## Exchange rates
+
+The *FX* page (`/api/fx/*`) shows a rate table for any base currency, a
+history chart of the selected pair and a converter. `fx.provider`:
+
+* `frankfurter` (default): [Frankfurter](https://www.frankfurter.app) serves
+  the European Central Bank reference rates — free, no API key, ~30 currencies,
+  updated once per working day (not intraday). Responses are cached for
+  `fx.cache_ttl_seconds`; if the service is down the last table is served and
+  flagged as stale.
+* `demo`: deterministic synthetic rates for offline use (used by the tests and
+  `config.demo.json`).
+
+The same service converts foreign-currency deposits.
+
+## AI insights
+
+The *Insights* page always shows deterministic, rule-based observations. To
+add a narrative analysis configure any **OpenAI-compatible chat-completions
+endpoint** under *Settings → AI insights* (or in `config.json`):
+
+```jsonc
+"ai": {
+  "enabled": true,
+  "base_url": "https://api.openai.com/v1",   // or Azure/Groq/Together…, or http://localhost:11434/v1 for Ollama
+  "api_key": "",                             // or TRADING_BOT_AI_API_KEY; optional for localhost endpoints
+  "model": "gpt-4o-mini",
+  "timeout_seconds": 45
+}
+```
+
+*Generate analysis* sends only the aggregated statistics of your account
+(stats, breakdowns, the last 15 closed trades, the heuristic observations) —
+never credentials, e-mail addresses or raw fills — and renders the model's
+verdict, strengths/weaknesses and suggestions. Nothing is sent unless you
+click the button.
+
 ## Deployment & scaling
 
 ### Container
@@ -271,12 +496,14 @@ docker run -d -p 8080:8080 -v trading-bot-data:/data \
 
 The image is multi-stage (dependencies installed from the lock file with uv,
 slim runtime, non-root user, `HEALTHCHECK` on `/api/health`). All state lives in
-`/data` (config with the hashed login, signal history, paper broker, rate-limit
+`/data` (config, user accounts and signal history (SQLite), paper accounts, rate-limit
 counters, session secret), so the container is disposable. Every setting can be
 supplied through the environment: `TRADING_BOT__<SECTION>__<FIELD>`
 (`TRADING_BOT__WEB__HOST`, `TRADING_BOT__WATCHLIST=AAPL,MSFT`,
 `TRADING_BOT__MARKET_HOURS__ENABLED=false`, …) plus the secrets
-`TRADING_BOT_API_KEY`, `TRADING_BOT_WEB_PASSWORD`, `TRADING_BOT_WEB_TOKEN`.
+`TRADING_BOT_API_KEY`, `TRADING_BOT_WEB_PASSWORD`, `TRADING_BOT_WEB_TOKEN`,
+`TRADING_BOT_AI_API_KEY`, `TRADING_BOT_SMTP_PASSWORD`, `TRADING_BOT_STRIPE_SECRET_KEY`,
+`TRADING_BOT_STRIPE_WEBHOOK_SECRET`.
 
 `docker compose up -d` starts a bot shard behind an **nginx** reverse proxy
 (`deploy/nginx.conf`: TLS-ready, gzip, WebSocket upgrade, rate limiting of the
@@ -345,10 +572,14 @@ a smaller version is part of the regular test suite (`tests/test_scalability.py`
   "log_level": "INFO",
   "web": {                         // web server + login
     "host": "127.0.0.1", "port": 8080, "open_browser": true,
-    "username": "admin", "password_hash": "",   // set via the setup page or `trading-bot set-password`
+    "username": "admin", "password_hash": "",   // legacy/recovery: `trading-bot set-password` puts a hash here,
+                                                // it is moved into the user database at the next start
     "token": "",                   // optional bearer token for scripts (or TRADING_BOT_WEB_TOKEN)
     "secret_key": "",              // signs session cookies; generated into data_dir when empty
     "session_hours": 12,
+    "allow_signup": true,          // visitors may create their own account
+    "email_verification": "auto",  // auto | required | off (see "Login, accounts and sign-up")
+    "public_url": "",              // external URL used in e-mails, e.g. https://bot.example.com
     "base_path": "",               // e.g. "/bots/a" when served under a prefix by a reverse proxy
     "worker_threads": 64
   },
@@ -361,7 +592,8 @@ a smaller version is part of the regular test suite (`tests/test_scalability.py`
     "requests_per_day": null,
     "cache_ttl_seconds": 60,
     "csv_directory": "data",       // for the csv provider: <SYMBOL>.csv with time,open,high,low,close,volume
-    "closed_bars_only": false      // true = ignore the still-forming intraday bar
+    "closed_bars_only": false,     // true = ignore the still-forming intraday bar
+    "symbols_file": ""             // optional "symbol,name[,type]" CSV merged into the ticker suggestions
   },
   "market_hours": {                // session used for budget pacing; polling pauses when closed
     "enabled": true,               // false = 24h markets (crypto/forex), pace over the whole day
@@ -370,11 +602,37 @@ a smaller version is part of the regular test suite (`tests/test_scalability.py`
     "close": "16:00",
     "weekdays": [0, 1, 2, 3, 4]    // Monday = 0
   },
-  "notifications": { "desktop": true, "sound": true, "webhook_url": "", "email": { ... } },
+  "notifications": {
+    "desktop": true, "sound": true, "webhook_url": "",
+    "email": {                     // signal e-mails and account verification links
+      "enabled": false,            // send trade signals by e-mail
+      "transport": "smtp",         // smtp | outbox (writes .eml files to <data_dir>/outbox)
+      "host": "", "port": 587, "username": "", "password": "", "sender": "", "recipients": [], "use_tls": true
+    }
+  },
+  "ai": { "enabled": false, "base_url": "https://api.openai.com/v1", "api_key": "", "model": "gpt-4o-mini", "timeout_seconds": 45 },
+  "execution": {                   // fill simulation for paper accounts + the order ticket's Simulate
+    "slippage_model": "none",      // none | fixed | volume
+    "slippage_bps": 5, "impact_coefficient": 0.1, "max_participation_pct": 10,
+    "commission_per_order": 0, "commission_per_share": 0, "commission_pct": 0, "min_commission": 0,
+    "limit_order_expiry_bars": 0   // resting paper limit orders expire after N bars (0 = never)
+  },
+  "payments": {                    // funding of paper accounts
+    "provider": "mock",            // mock (sandbox checkout) | stripe | none
+    "currency": "USD",             // account currency
+    "min_amount": 10, "max_amount": 1000000,
+    "stripe": { "secret_key": "", "webhook_secret": "", "api_base": "https://api.stripe.com" }
+  },
+  "fx": {                          // exchange rates (FX page, deposit conversion)
+    "provider": "frankfurter",     // frankfurter (ECB, free) | demo
+    "base_currency": "USD",
+    "quote_currencies": ["EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "CNY", "SEK", "NOK", "MXN", "INR", "BRL"],
+    "cache_ttl_seconds": 3600
+  },
   "trading": {
     "trading_enabled": false,      // execute signals through the (paper) broker
     "paper": true,
-    "initial_cash": 100000,
+    "initial_cash": 100000,        // starting cash of every user's paper account
     "position_size_pct": 0.1,      // fraction of equity per position
     "max_positions": 5
   }
@@ -400,19 +658,30 @@ trading_bot/
     providers.py     AlphaVantage, TwelveData, CSV, Demo (UTC OHLCV frames)
     ratelimit.py     persisted sliding-window limiter (per minute / per day)
     service.py       cache + budget-aware fetching with stale fallback
-  engine.py          scan loop, de-duplication, protective exits, event bus
+  engine.py          scan loop, de-duplication, protective exits, resting orders, event bus, per-account execution
   notify.py          log / webhook / e-mail / callback channels
-  broker.py          Broker interface + PaperBroker (persisted)
-  storage.py         SQLite signal & fill history
+  broker.py          Broker interface + PaperBroker (market/limit orders, deposits, persisted) + AccountManager
+  brokers/alpaca.py  Alpaca Trading API adapter (account, positions, market/limit/bracket orders, close)
+  execution.py       ExecutionSimulator: slippage / commission models, order dry-runs
+  trading.py         OrderService: manual orders, simulate, close position, cancel (ledger + events)
+  payments.py        payment providers: sandbox checkout, Stripe (Checkout Sessions, payouts, webhooks)
+  wallet.py          WalletService: deposits (with FX conversion), withdrawals, ledger, webhook handling
+  fx.py              exchange rates: Frankfurter (ECB) / demo providers, caching FxService
+  storage.py         SQLite signal & fill history, transaction ledger, user accounts
+  analytics.py       closed trades (FIFO), P&L curve, statistics, heuristic insights, LLM client
   backtest.py        event-driven backtester
   app.py             composition root; __main__.py CLI
   tools/loadtest.py  load / scalability test (also used by CI in a container)
   web/
     server.py        FastAPI app: REST API, WebSocket broadcaster, static files
+    routes_trading.py / routes_wallet.py / routes_fx.py   API routers (orders, broker connection, wallet, FX)
     charting.py      chart payloads (bars, overlays grouped into panes, markers)
-    auth.py          PBKDF2 password hashing, session store, login throttling
-    static/          Material Design single-page app (index.html, login.html, css/material.css,
-                     js/app.js, js/chart.js, js/ui.js, js/login.js) - no build step
+    auth.py          PBKDF2 password hashing, password rules, signed sessions, login throttling
+    users.py         registration, e-mail verification, authentication, profiles
+    mail.py          SMTP / outbox mailer
+    static/          Material Design single-page app (index.html, login.html, signup.html, pay.html,
+                     css/material.css, js/app.js, js/chart.js, js/ui.js, js/login.js, js/signup.js, js/pay.js,
+                     js/passwords.js, js/autocomplete.js) - no build step
 ```
 
 The engine runs on background threads and publishes events on an `EventBus`;
@@ -433,11 +702,11 @@ uv run mypy tests trading_bot # type check (tests are fully annotated and checke
 
 | Layer | Where | What |
 | --- | --- | --- |
-| Unit | `tests/test_indicators.py`, `test_expression.py`, `test_strategy.py`, `test_backtest.py`, `test_broker_storage.py`, `test_notify_config.py`, `test_data_service.py`, `test_providers.py` | Pure logic; providers use recorded API payloads and a fake HTTP session |
-| Integration | `tests/test_engine.py`, `tests/test_cli.py` | Scan loop, pacing, market hours, paper trading, CLI commands incl. `serve` |
+| Unit | `tests/test_indicators.py`, `test_expression.py`, `test_strategy.py`, `test_backtest.py`, `test_broker_storage.py`, `test_execution.py`, `test_alpaca.py`, `test_payments.py`, `test_fx.py`, `test_analytics.py`, `test_users.py`, `test_notify_config.py`, `test_data_service.py`, `test_providers.py` | Pure logic; providers, the Alpaca API, Stripe, Frankfurter and the LLM client run against `httpx.MockTransport` fakes; e-mails go to the outbox |
+| Integration | `tests/test_engine.py`, `tests/test_cli.py` | Scan loop, pacing, market hours, paper trading in several accounts with slippage/commissions, resting limit orders, manual order service, CLI commands incl. `serve` |
 | Scalability | `tests/test_scalability.py` | Load-test tool run in-process: 60 WebSocket subscribers + 8 HTTP users, fan-out and latency thresholds |
-| API | `tests/test_web_api.py`, `tests/test_web_auth.py` | Every REST endpoint, login/session/setup/throttling, bearer token and the WebSocket (FastAPI `TestClient`, no browser) |
-| End-to-end | `tests/test_web_e2e.py` | Playwright + headless Chromium against a live server: login and first-run setup pages, layout/MD tokens, chart pixels, zoom/pan, watchlist, engine & notifications, editor, backtest dialog, settings, credential change, error states |
+| API | `tests/test_web_api.py`, `tests/test_web_auth.py`, `tests/test_web_trading_api.py` | Every REST endpoint, login/session/setup/throttling, sign-up + verification, per-user accounts, orders / broker connection (fake Alpaca), wallet + sandbox checkout + Stripe webhook, transactions CSV, FX, history/analytics/AI, bearer token and the WebSocket (FastAPI `TestClient`, no browser) |
+| End-to-end | `tests/test_web_e2e.py` | Playwright + headless Chromium against a live server: login (reveal toggle, sign-up link), first-run setup, sign-up with verification e-mail and login by e-mail, layout/MD tokens, chart pixels, zoom/pan, watchlist, engine & notifications, editor, backtest dialog, settings, profile + password change, history (P&L canvas) and insights pages, order ticket (simulate → place → limit → cancel → close), wallet deposit through the sandbox checkout page + withdrawal + ledger filters, FX table/chart/converter, broker connection card, error states |
 
 Browser tests need a Chromium for Playwright: `uv run playwright install chromium`
 (they are skipped with a message if it is missing). All widgets used by the
@@ -449,10 +718,13 @@ The tests are fully type-annotated; `mypy` checks them with
 
 ## Going live
 
-`trading_enabled: true` routes signals to the **paper** broker. To trade real
-money implement `trading_bot.broker.Broker` for your brokerage and wire it in
-`trading_bot/app.py`. Before doing so, backtest, paper trade for a while, and
-keep `closed_bars_only` enabled to avoid acting on unfinished bars.
+By default signals execute in the **paper** accounts. To trade real money
+connect a brokerage under *Settings → Broker connection* (Alpaca ships in the
+box — start with its paper environment; the live switch is explicit and every
+live order asks for confirmation) or implement `trading_bot.broker.Broker` for
+another brokerage. Before doing so, backtest, paper trade for a while with a
+realistic `execution` model, and keep `closed_bars_only` enabled to avoid
+acting on unfinished bars.
 
 ## Disclaimer
 

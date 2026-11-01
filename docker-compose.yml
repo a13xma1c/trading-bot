@@ -16,6 +16,8 @@ services:
     environment:
       TRADING_BOT_WEB_PASSWORD: ${TRADING_BOT_WEB_PASSWORD:-}       # leave empty to use the first-run setup page
       TRADING_BOT_API_KEY: ${TRADING_BOT_API_KEY:-}
+      TRADING_BOT_STRIPE_SECRET_KEY: ${TRADING_BOT_STRIPE_SECRET_KEY:-}       # optional: real deposits via Stripe Checkout
+      TRADING_BOT_STRIPE_WEBHOOK_SECRET: ${TRADING_BOT_STRIPE_WEBHOOK_SECRET:-}
       TRADING_BOT__DATA__PROVIDER: ${TRADING_BOT_PROVIDER:-demo}
       TRADING_BOT__WATCHLIST: ${TRADING_BOT_WATCHLIST:-AAPL,MSFT,GOOGL,AMZN,NVDA}
     volumes:

@@ -135,6 +135,10 @@ class TwelveDataSession(FakeSession):
             return FakeResponse(200, {"code": 401, "message": "**apikey** parameter is incorrect", "status": "error"})
         if self.mode == "429":
             return FakeResponse(429, {"code": 429, "message": "You have run out of API credits", "status": "error"})
+        if url.endswith("/symbol_search"):
+            query = str((params or {}).get("symbol", "")).upper()
+            return FakeResponse(200, {"data": [{"symbol": query, "instrument_name": f"{query.title()} Holdings",
+                                                "country": "United States", "instrument_type": "Common Stock"}]})
         return FakeResponse(200, twelvedata_payload(last=self.last))
 
 

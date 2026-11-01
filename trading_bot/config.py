@@ -9,6 +9,7 @@ have to be committed to version control:
 * ``TRADING_BOT_SMTP_PASSWORD`` - overrides ``notifications.email.password``
 * ``TRADING_BOT_WEB_TOKEN`` - overrides ``web.token`` (API token for scripted access)
 * ``TRADING_BOT_WEB_PASSWORD`` - plain-text login password (hashed in memory; handy for containers)
+* ``TRADING_BOT_AI_API_KEY`` - overrides ``ai.api_key`` (LLM provider for the analytics insights)
 * ``TRADING_BOT__<SECTION>__<FIELD>`` - any other setting, e.g. ``TRADING_BOT__DATA__PROVIDER=demo``
 
 The loader also understands the legacy flat layout used by the first version of
@@ -58,6 +59,7 @@ class DataConfig:
     cache_ttl_seconds: int = 60
     csv_directory: str = "data"
     closed_bars_only: bool = False  # ignore the still-forming last intraday bar
+    symbols_file: str = ""          # optional extra "symbol,name[,type]" CSV merged into the ticker directory
 
     def budget(self) -> tuple[int, int]:
         per_min, per_day = PROVIDER_BUDGETS.get(self.provider, (5, 500))
@@ -105,7 +107,8 @@ def _parse_hhmm(text: str) -> tuple[int, int]:
 
 @dataclass
 class EmailConfig:
-    enabled: bool = False
+    enabled: bool = False      # send trade-signal notifications by e-mail
+    transport: str = "smtp"    # smtp | outbox (writes .eml files into <data_dir>/outbox - for development)
     host: str = ""
     port: int = 587
     username: str = ""
@@ -140,9 +143,23 @@ class WebConfig:
     token: str = ""           # optional API token (or TRADING_BOT_WEB_TOKEN)
     secret_key: str = ""      # signs session cookies; generated and persisted in data_dir when empty
     session_hours: float = 12.0
+    allow_signup: bool = True           # let visitors create their own account
+    email_verification: str = "auto"    # auto (when e-mail delivery is configured) | required | off
+    public_url: str = ""                # external URL used in e-mails, e.g. https://bot.example.com
     base_path: str = ""       # external URL prefix when served behind a reverse proxy, e.g. "/bots/a"
     worker_threads: int = 64  # thread pool used for (blocking) API handlers
     open_browser: bool = True
+
+
+@dataclass
+class AIConfig:
+    """Optional LLM provider (OpenAI-compatible chat completions API) for the analytics insights."""
+
+    enabled: bool = False
+    base_url: str = "https://api.openai.com/v1"
+    api_key: str = ""          # or TRADING_BOT_AI_API_KEY
+    model: str = "gpt-4o-mini"
+    timeout_seconds: float = 45.0
 
 
 @dataclass
@@ -152,6 +169,70 @@ class TradingConfig:
     initial_cash: float = 100_000.0
     position_size_pct: float = 0.10
     max_positions: int = 5
+
+
+SLIPPAGE_MODELS = ("none", "fixed", "volume")
+
+
+@dataclass
+class ExecutionConfig:
+    """Fill simulation for paper accounts and the order-ticket *Simulate* feature.
+
+    ``none`` fills at the reference price; ``fixed`` applies ``slippage_bps`` against the
+    trader; ``volume`` adds square-root market impact scaled by the order's share of the
+    average bar volume.  Commissions are charged per order, per share and/or as a
+    percentage of the traded value (``min_commission`` as a floor).
+    """
+
+    slippage_model: str = "none"
+    slippage_bps: float = 5.0            # half-spread estimate in basis points (fixed / volume models)
+    impact_coefficient: float = 0.1      # volume model: price impact = coeff * volatility * sqrt(qty / avg volume)
+    max_participation_pct: float = 10.0  # warn when an order exceeds this share of the average bar volume
+    commission_per_order: float = 0.0
+    commission_per_share: float = 0.0
+    commission_pct: float = 0.0          # percentage of traded value, e.g. 0.1 = 0.1 %
+    min_commission: float = 0.0
+    limit_order_expiry_bars: int = 0     # 0 = good till cancelled
+
+
+PAYMENT_PROVIDERS = ("none", "mock", "stripe")
+
+
+@dataclass
+class StripeConfig:
+    secret_key: str = ""       # or TRADING_BOT_STRIPE_SECRET_KEY
+    webhook_secret: str = ""   # or TRADING_BOT_STRIPE_WEBHOOK_SECRET (signing secret of the webhook endpoint)
+    api_base: str = "https://api.stripe.com"
+
+
+@dataclass
+class PaymentsConfig:
+    """Deposits / withdrawals of the paper accounts.
+
+    ``mock`` is a built-in sandbox: the deposit redirects to a local checkout page where the
+    payment is confirmed or cancelled (for demos and tests).  ``stripe`` creates Stripe Checkout
+    sessions and credits the account when the ``checkout.session.completed`` webhook arrives.
+    """
+
+    provider: str = "mock"
+    currency: str = "USD"          # account currency; deposits in other currencies are converted at the current rate
+    min_amount: float = 10.0
+    max_amount: float = 1_000_000.0
+    stripe: StripeConfig = field(default_factory=StripeConfig)
+
+
+FX_PROVIDERS = ("frankfurter", "demo")
+
+
+@dataclass
+class FxConfig:
+    """Exchange rates: Frankfurter (ECB reference rates, free, no key) or deterministic demo rates."""
+
+    provider: str = "frankfurter"
+    base_currency: str = "USD"
+    quote_currencies: list[str] = field(default_factory=lambda: ["EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "CNY",
+                                                                  "SEK", "NOK", "MXN", "INR", "BRL"])
+    cache_ttl_seconds: int = 3600
 
 
 @dataclass
@@ -167,6 +248,10 @@ class AppConfig:
     notifications: NotificationConfig = field(default_factory=NotificationConfig)
     trading: TradingConfig = field(default_factory=TradingConfig)
     web: WebConfig = field(default_factory=WebConfig)
+    ai: AIConfig = field(default_factory=AIConfig)
+    execution: ExecutionConfig = field(default_factory=ExecutionConfig)
+    payments: PaymentsConfig = field(default_factory=PaymentsConfig)
+    fx: FxConfig = field(default_factory=FxConfig)
 
     # ------------------------------------------------------------------ io
     @classmethod
@@ -184,6 +269,10 @@ class AppConfig:
             notifications=_build_notifications(raw.get("notifications", {})),
             trading=_build(TradingConfig, raw.get("trading", {})),
             web=_build(WebConfig, raw.get("web", {})),
+            ai=_build(AIConfig, raw.get("ai", {})),
+            execution=_build(ExecutionConfig, raw.get("execution", {})),
+            payments=_build_payments(raw.get("payments", {})),
+            fx=_build(FxConfig, raw.get("fx", {})),
         )
         cfg.apply_env()
         cfg.validate()
@@ -236,6 +325,10 @@ class AppConfig:
     def csv_directory_path(self) -> Path:
         return self.resolve(self.data.csv_directory)
 
+    @property
+    def symbols_file_path(self) -> Path | None:
+        return self.resolve(self.data.symbols_file) if self.data.symbols_file else None
+
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
         data.pop("base_dir", None)
@@ -270,6 +363,12 @@ class AppConfig:
             self.notifications.email.password = pw
         if token := os.environ.get("TRADING_BOT_WEB_TOKEN"):
             self.web.token = token
+        if ai_key := os.environ.get("TRADING_BOT_AI_API_KEY"):
+            self.ai.api_key = ai_key
+        if stripe_key := os.environ.get("TRADING_BOT_STRIPE_SECRET_KEY"):
+            self.payments.stripe.secret_key = stripe_key
+        if stripe_secret := os.environ.get("TRADING_BOT_STRIPE_WEBHOOK_SECRET"):
+            self.payments.stripe.webhook_secret = stripe_secret
         if password := os.environ.get("TRADING_BOT_WEB_PASSWORD"):
             from .web.auth import hash_password
 
@@ -316,6 +415,29 @@ class AppConfig:
             raise ConfigError("web.base_path must start with '/' and not end with '/' (e.g. /bots/a)")
         if self.web.worker_threads < 1:
             raise ConfigError("web.worker_threads must be >= 1")
+        if self.web.email_verification not in ("auto", "required", "off"):
+            raise ConfigError("web.email_verification must be auto, required or off")
+        if self.notifications.email.transport not in ("smtp", "outbox"):
+            raise ConfigError("notifications.email.transport must be smtp or outbox")
+        ex = self.execution
+        if ex.slippage_model not in SLIPPAGE_MODELS:
+            raise ConfigError(f"execution.slippage_model must be one of {', '.join(SLIPPAGE_MODELS)}")
+        if min(ex.slippage_bps, ex.impact_coefficient, ex.commission_per_order, ex.commission_per_share,
+               ex.commission_pct, ex.min_commission, ex.limit_order_expiry_bars) < 0:
+            raise ConfigError("execution settings must not be negative")
+        if not 0 < ex.max_participation_pct <= 100:
+            raise ConfigError("execution.max_participation_pct must be in (0, 100]")
+        if self.payments.provider not in PAYMENT_PROVIDERS:
+            raise ConfigError(f"payments.provider must be one of {', '.join(PAYMENT_PROVIDERS)}")
+        for code in [self.payments.currency, self.fx.base_currency, *self.fx.quote_currencies]:
+            if not (len(code) == 3 and code.isalpha() and code.isupper()):
+                raise ConfigError(f"Currency codes must be three upper-case letters (ISO 4217); got {code!r}")
+        if not 0 < self.payments.min_amount <= self.payments.max_amount:
+            raise ConfigError("payments.min_amount must be positive and not exceed payments.max_amount")
+        if self.fx.provider not in FX_PROVIDERS:
+            raise ConfigError(f"fx.provider must be one of {', '.join(FX_PROVIDERS)}")
+        if self.fx.cache_ttl_seconds < 1:
+            raise ConfigError("fx.cache_ttl_seconds must be >= 1")
         for sym in self.watchlist:
             if not sym.replace(".", "").replace("-", "").isalnum():
                 raise ConfigError(f"Invalid symbol in watchlist: {sym!r}")
@@ -359,6 +481,15 @@ def _build_notifications(raw: dict[str, Any]) -> NotificationConfig:
     email_raw = raw.pop("email", {}) or {}
     cfg = _build(NotificationConfig, raw)
     cfg.email = _build(EmailConfig, email_raw)
+    return cfg
+
+
+def _build_payments(raw: dict[str, Any]) -> PaymentsConfig:
+    raw = dict(raw)
+    stripe_raw = raw.pop("stripe", {}) or {}
+    cfg = _build(PaymentsConfig, raw)
+    cfg.stripe = _build(StripeConfig, stripe_raw)
+    cfg.currency = cfg.currency.upper()
     return cfg
 
 

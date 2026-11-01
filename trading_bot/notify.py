@@ -85,7 +85,7 @@ class EmailChannel(NotificationChannel):
     name = "email"
 
     def __init__(self, cfg: EmailConfig, smtp_factory: Callable[[], Any] | None = None):
-        if not cfg.host or not cfg.recipients:
+        if (cfg.transport == "smtp" and not cfg.host) or not cfg.recipients:
             raise ValueError("email host and recipients are required")
         self.cfg = cfg
         self._smtp_factory = smtp_factory or (lambda: smtplib.SMTP(cfg.host, cfg.port, timeout=15))

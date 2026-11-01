@@ -28,11 +28,12 @@ class Signal:
     reason: str = ""
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
+    account: str = ""  # set for account-specific signals (protective exits); empty = all accounts
 
     @property
-    def key(self) -> tuple[str, str, str, str]:
+    def key(self) -> tuple[str, str, str, str, str]:
         """Identity used to suppress duplicate notifications for the same bar."""
-        return (self.strategy, self.symbol, self.action, self.bar_time.isoformat())
+        return (self.strategy, self.symbol, self.action, self.bar_time.isoformat(), self.account)
 
     def headline(self) -> str:
         return f"{self.action} {self.symbol} @ {self.price:.2f}"
@@ -40,6 +41,8 @@ class Signal:
     def describe(self) -> str:
         when = self.bar_time.astimezone().strftime("%Y-%m-%d %H:%M")
         text = f"{self.headline()} - {self.strategy} ({when})"
+        if self.account:
+            text += f" [account {self.account}]"
         if self.reason:
             text += f"\n{self.reason}"
         return text

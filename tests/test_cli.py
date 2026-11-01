@@ -128,9 +128,9 @@ def test_set_password_command(demo_project: Path, capsys: pytest.CaptureFixture[
     from trading_bot.web.auth import verify_password
 
     assert main(["set-password", "--username", "owner", "--password", "short"]) == 1
-    assert "8 characters" in capsys.readouterr().err
-    assert main(["set-password", "--username", "owner", "--password", "a proper password"]) == 0
+    assert "10 characters" in capsys.readouterr().err
+    assert main(["set-password", "--username", "owner", "--password", "A-proper-pass3!"]) == 0
     assert "owner" in capsys.readouterr().out
     cfg = AppConfig.load(demo_project / "config.json")
-    assert cfg.web.username == "owner" and verify_password("a proper password", cfg.web.password_hash)
-    assert "a proper password" not in (demo_project / "config.json").read_text()
+    assert cfg.web.username == "owner" and verify_password("A-proper-pass3!", cfg.web.password_hash)
+    assert "A-proper-pass3!" not in (demo_project / "config.json").read_text()

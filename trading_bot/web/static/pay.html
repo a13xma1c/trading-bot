@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Sandbox checkout · Trading Bot</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap">
+  <link rel="stylesheet" href="../../static/css/material.css">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='6' fill='%231d4a8f'/%3E%3Cpath fill='%23d6e3ff' d='M3.5 18.49l6-6.01 4 4L22 6.92l-1.41-1.41-7.09 7.97-4-4L2 16.99z'/%3E%3C/svg%3E">
+</head>
+<body class="login-body">
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-card" viewBox="0 0 24 24"><path d="M20 4H4c-1.11 0-1.99.89-1.99 2L2 18c0 1.11.89 2 2 2h16c1.11 0 2-.89 2-2V6c0-1.11-.89-2-2-2zm0 14H4v-6h16v6zm0-10H4V6h16v2z"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></symbol>
+  </defs>
+</svg>
+
+<main class="login-layout">
+  <div class="card elevated login-card" id="payCard">
+    <div class="login-brand">
+      <div class="brand"><svg class="icon"><use href="#i-card"/></svg></div>
+      <div>
+        <h1 class="headline-small" style="margin:0">Sandbox checkout</h1>
+        <div class="body-medium muted">No real money moves - this page stands in for the payment provider.</div>
+      </div>
+    </div>
+    <div class="notice" id="payNotice">Loading…</div>
+    <dl class="kv" id="paySummary" style="margin:16px 0"></dl>
+    <div class="text-field"><div class="field"><input id="cardNumber" placeholder=" " value="4242 4242 4242 4242" inputmode="numeric" autocomplete="off"><label for="cardNumber">Card number (any value works)</label></div></div>
+    <div class="row">
+      <div class="text-field" style="flex:1"><div class="field"><input id="cardExpiry" placeholder=" " value="12/34"><label for="cardExpiry">Expiry</label></div></div>
+      <div class="text-field" style="flex:1"><div class="field"><input id="cardCvc" placeholder=" " value="123"><label for="cardCvc">CVC</label></div></div>
+    </div>
+    <div class="body-medium error-text" id="payError" role="alert"></div>
+    <div class="row" style="margin-top:8px">
+      <button type="button" class="btn filled" id="payButton"><svg class="icon"><use href="#i-check"/></svg><span id="payButtonLabel">Pay</span></button>
+      <button type="button" class="btn text" id="cancelButton">Cancel and return</button>
+    </div>
+  </div>
+</main>
+
+<script type="module" src="../../static/js/pay.js"></script>
+</body>
+</html>

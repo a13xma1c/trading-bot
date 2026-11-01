@@ -20,9 +20,10 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from .broker import Broker, BrokerError, PaperBroker
+from .broker import AccountManager, Broker, BrokerError, Fill, PaperBroker
 from .config import INTERVAL_SECONDS, AppConfig
 from .data import BarsResult, MarketDataService, ProviderError, RateLimitError
+from .execution import ExecutionSimulator, MarketSnapshot
 from .notify import Notifier
 from .storage import Storage
 from .strategy import ACTION_BUY, ACTION_SELL, Signal, Strategy, StrategyStore
@@ -78,7 +79,30 @@ class ScanCompleted(Event):
 
 @dataclass
 class PositionsChanged(Event):
-    pass
+    account: str = ""   # "" = unspecified / several accounts
+
+
+@dataclass
+class OrderEvent(Event):
+    """A manual order or resting limit order was filled / placed / cancelled in ``account``."""
+
+    account: str
+    kind: str          # filled | placed | cancelled | rejected
+    symbol: str
+    side: str
+    quantity: float
+    price: float | None = None
+    message: str = ""
+
+
+@dataclass
+class WalletChanged(Event):
+    """Cash moved in or out of ``account`` (deposit / withdrawal)."""
+
+    account: str
+    kind: str
+    amount: float
+    status: str
 
 
 @dataclass
@@ -131,22 +155,26 @@ class TradingEngine:
     def __init__(self, config: AppConfig, data: MarketDataService, strategies: StrategyStore,
                  notifier: Notifier, broker: Broker | None = None, storage: Storage | None = None,
                  bus: EventBus | None = None,
-                 data_factory: Callable[[AppConfig], MarketDataService] | None = None):
+                 data_factory: Callable[[AppConfig], MarketDataService] | None = None,
+                 accounts: AccountManager | None = None):
         self.config = config
         self.data = data
         self._data_factory = data_factory
         self.strategies = strategies
         self.notifier = notifier
-        self.broker = broker or PaperBroker(config.trading.initial_cash)
+        self.accounts = accounts or AccountManager(config.trading.initial_cash, default_name=config.web.username)
+        # The default account (the administrator's) is what the CLI tools and ``engine.broker`` use.
+        self.accounts.ensure(self.accounts.default_name, enabled=config.trading.trading_enabled, broker=broker)
         self.storage = storage or Storage(":memory:")
         self.bus = bus or EventBus()
+        self.execution = ExecutionSimulator(config.execution)  # slippage / commission model for paper fills
         self.stats = EngineStats()
         self._watchlist: list[str] = list(config.watchlist)
         self._lock = threading.RLock()
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._wake = threading.Event()
-        self._seen: set[tuple[str, str, str, str]] = set()
+        self._seen: set[tuple[str, str, str, str, str]] = set()
         self._latest: dict[str, BarsResult] = {}
         self._errors: dict[str, str] = {}
         self._force_next = False
@@ -154,6 +182,11 @@ class TradingEngine:
         self._now: Callable[[], datetime] = lambda: datetime.now(UTC)  # injectable clock (tests)
 
     # --------------------------------------------------------------- state
+    @property
+    def broker(self) -> Broker:
+        """The default (administrator) paper account."""
+        return self.accounts.default
+
     @property
     def running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
@@ -381,6 +414,8 @@ class TradingEngine:
                 continue
             produced.extend(self._evaluate_symbol(symbol, bars, strategies))
             produced.extend(self._check_protective_exits(symbol, bars))
+            if result is not before:
+                self._process_pending_orders(symbol, bars)
         self.stats.scans += 1
         self.stats.last_scan = started
         duration = time.monotonic() - t0
@@ -463,20 +498,73 @@ class TradingEngine:
         return out
 
     def _check_protective_exits(self, symbol: str, bars: pd.DataFrame) -> list[Signal]:
-        pos = self.broker.position(symbol)
-        if pos is None:
-            return []
+        out: list[Signal] = []
         price = float(bars["close"].iloc[-1])
         bar_time = bars.index[-1].to_pydatetime()
-        reason = None
-        if pos.stop_loss is not None and price <= pos.stop_loss:
-            reason = f"Stop loss hit ({price:.2f} <= {pos.stop_loss:.2f})"
-        elif pos.take_profit is not None and price >= pos.take_profit:
-            reason = f"Take profit hit ({price:.2f} >= {pos.take_profit:.2f})"
-        if reason is None:
-            return []
-        signal = Signal(symbol, ACTION_SELL, pos.strategy or "risk-management", price, bar_time, reason)
-        return [signal] if self._handle_signal(signal, None) else []
+        for account, broker in self.accounts.all():
+            if not isinstance(broker, PaperBroker):
+                continue  # external brokers manage stops themselves (bracket orders)
+            pos = broker.position(symbol)
+            if pos is None:
+                continue
+            reason = None
+            if pos.stop_loss is not None and price <= pos.stop_loss:
+                reason = f"Stop loss hit ({price:.2f} <= {pos.stop_loss:.2f})"
+            elif pos.take_profit is not None and price >= pos.take_profit:
+                reason = f"Take profit hit ({price:.2f} >= {pos.take_profit:.2f})"
+            if reason is None:
+                continue
+            signal = Signal(symbol, ACTION_SELL, pos.strategy or "risk-management", price, bar_time, reason,
+                            account=account)
+            if self._handle_signal(signal, None):
+                out.append(signal)
+        return out
+
+    def _process_pending_orders(self, symbol: str, bars: pd.DataFrame) -> None:
+        """Fill resting limit orders of paper accounts against the newest bar."""
+        last = bars.iloc[-1]
+        when = bars.index[-1].to_pydatetime()
+        for account, broker in self.accounts.all():
+            if not isinstance(broker, PaperBroker) or not broker.pending_orders():
+                continue  # resting orders at an external broker are filled by the broker
+            try:
+                fills = broker.process_pending(symbol, float(last["high"]), float(last["low"]), when)
+            except BrokerError as exc:
+                logger.error("[%s] pending orders for %s failed: %s", account, symbol, exc)
+                continue
+            for fill in fills:
+                self.record_fill(account, broker, fill, source="limit order")
+                self.bus.publish(OrderEvent(account, "filled", fill.symbol, fill.side, fill.quantity, fill.price,
+                                            f"Limit order filled: {fill.side} {fill.quantity:g} {fill.symbol} @ {fill.price:.2f}"))
+            if fills:
+                self.bus.publish(PositionsChanged(account))
+
+    def market_snapshot(self, symbol: str, price: float | None = None) -> MarketSnapshot:
+        """Price / liquidity snapshot used by the execution simulator."""
+        latest = self.latest_bars(symbol)
+        bars = latest.bars if latest is not None and not latest.empty else None
+        if bars is None and price is None:
+            cached = self.data.cached_bars(symbol, self.config.data.interval)
+            bars = cached.bars if cached is not None and not cached.empty else None
+        return MarketSnapshot.from_bars(bars, price)
+
+    def record_fill(self, account: str, broker: Broker, fill: Fill, source: str = "signal") -> dict[str, Any]:
+        """Persist a fill and the matching ledger entry (cash movement incl. commission)."""
+        self.storage.record_fill(fill, account=account)
+        gross = fill.quantity * fill.price
+        amount = -(gross + fill.commission) if fill.side == ACTION_BUY else gross - fill.commission
+        try:
+            balance = broker.cash()
+        except BrokerError:
+            balance = None
+        description = f"{fill.side} {fill.quantity:g} {fill.symbol} @ {fill.price:.2f}"
+        if fill.strategy:
+            description += f" ({fill.strategy})"
+        return self.storage.record_transaction(
+            account, "buy" if fill.side == ACTION_BUY else "sell", amount, currency=self.config.payments.currency,
+            fee=fill.commission, symbol=fill.symbol, quantity=fill.quantity, price=fill.price, description=description,
+            reference=fill.id, balance_after=balance, timestamp=fill.timestamp,
+            metadata={"source": source, "realized_pnl": fill.realized_pnl, "broker": broker.name})
 
     # -------------------------------------------------------------- signals
     def _handle_signal(self, signal: Signal, strategy: Strategy | None) -> bool:
@@ -491,11 +579,9 @@ class TradingEngine:
                 self._seen.clear()
         if not self.storage.record_signal(signal):
             return False  # already stored in a previous session
-        executed = False
-        if self.config.trading.trading_enabled:
-            executed = self._execute(signal, strategy)
-            if executed:
-                self.storage.mark_executed(signal.id)
+        executed = self._execute(signal, strategy)
+        if executed:
+            self.storage.mark_executed(signal.id)
         self.stats.signals += 1
         self.stats.recent_signals.append(signal)
         del self.stats.recent_signals[:-200]
@@ -504,41 +590,74 @@ class TradingEngine:
         return True
 
     def _execute(self, signal: Signal, strategy: Strategy | None) -> bool:
+        """Execute ``signal`` in every auto-trading account (or only in ``signal.account``)."""
+        if signal.account:
+            broker = self.accounts.get(signal.account)
+            targets = [(signal.account, broker)] if broker is not None else []
+        else:
+            targets = self.accounts.enabled()
+        executed = False
+        for account, broker in targets:
+            if self._execute_in(account, broker, signal, strategy):
+                executed = True
+        if executed:
+            self.bus.publish(PositionsChanged())
+        return executed
+
+    def _execute_in(self, account: str, broker: Broker, signal: Signal, strategy: Strategy | None) -> bool:
         try:
+            snapshot = self.market_snapshot(signal.symbol, signal.price)
             if signal.action == ACTION_BUY:
-                if self.broker.position(signal.symbol) is not None:
-                    logger.info("Already holding %s; not adding to position", signal.symbol)
+                if broker.position(signal.symbol) is not None:
+                    logger.info("[%s] already holding %s; not adding to position", account, signal.symbol)
                     return False
-                if len(self.broker.positions()) >= self.config.trading.max_positions:
-                    logger.info("Max positions reached; skipping BUY %s", signal.symbol)
+                if len(broker.positions()) >= self.config.trading.max_positions:
+                    logger.info("[%s] max positions reached; skipping BUY %s", account, signal.symbol)
                     return False
-                equity = self.broker.equity(self.latest_prices())
-                budget = min(self.broker.cash(), equity * self.config.trading.position_size_pct)
+                equity = broker.equity(self.latest_prices())
+                cash = broker.cash()
+                budget = min(cash, equity * self.config.trading.position_size_pct)
                 qty = math.floor(budget / signal.price)
+                price, commission = signal.price, 0.0
+                if isinstance(broker, PaperBroker) and qty >= 1:
+                    # Realistic paper fill: slippage against us plus commissions; shrink the order until it fits.
+                    while qty >= 1:
+                        price = self.execution.fill_price(ACTION_BUY, qty, snapshot)
+                        commission = self.execution.commission(qty, qty * price)
+                        if qty * price + commission <= cash + 1e-9:
+                            break
+                        qty -= 1
                 if qty < 1:
-                    logger.info("Not enough cash to buy one share of %s", signal.symbol)
+                    logger.info("[%s] not enough cash to buy one share of %s", account, signal.symbol)
                     return False
                 sl = tp = None
                 if strategy is not None:
                     if strategy.stop_loss_pct:
-                        sl = signal.price * (1 - strategy.stop_loss_pct / 100.0)
+                        sl = price * (1 - strategy.stop_loss_pct / 100.0)
                     if strategy.take_profit_pct:
-                        tp = signal.price * (1 + strategy.take_profit_pct / 100.0)
-                fill = self.broker.submit_market_order(signal.symbol, ACTION_BUY, qty, signal.price,
-                                                       signal.strategy, sl, tp)
+                        tp = price * (1 + strategy.take_profit_pct / 100.0)
+                if isinstance(broker, PaperBroker):
+                    fill = broker.submit_market_order(signal.symbol, ACTION_BUY, qty, price, signal.strategy, sl, tp,
+                                                      commission=commission)
+                else:
+                    fill = broker.submit_market_order(signal.symbol, ACTION_BUY, qty, price, signal.strategy, sl, tp)
             else:
-                pos = self.broker.position(signal.symbol)
+                pos = broker.position(signal.symbol)
                 if pos is None:
-                    logger.info("No position in %s to sell", signal.symbol)
+                    logger.info("[%s] no position in %s to sell", account, signal.symbol)
                     return False
-                fill = self.broker.submit_market_order(signal.symbol, ACTION_SELL, pos.quantity, signal.price,
-                                                       signal.strategy)
+                if isinstance(broker, PaperBroker):
+                    price = self.execution.fill_price(ACTION_SELL, pos.quantity, snapshot)
+                    commission = self.execution.commission(pos.quantity, pos.quantity * price)
+                    fill = broker.submit_market_order(signal.symbol, ACTION_SELL, pos.quantity, price, signal.strategy,
+                                                      commission=commission)
+                else:
+                    fill = broker.submit_market_order(signal.symbol, ACTION_SELL, pos.quantity, signal.price, signal.strategy)
         except BrokerError as exc:
-            logger.error("Order rejected: %s", exc)
-            self.bus.publish(StatusEvent(f"Order rejected: {exc}", "error"))
+            logger.error("[%s] order rejected: %s", account, exc)
+            self.bus.publish(StatusEvent(f"Order rejected ({account}): {exc}", "error"))
             return False
-        self.storage.record_fill(fill)
-        self.bus.publish(PositionsChanged())
+        self.record_fill(account, broker, fill, source="signal")
         return True
 
     # ------------------------------------------------------------ utilities

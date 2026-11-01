@@ -453,3 +453,187 @@ def test_reconfigure_data_swaps_provider_live(tmp_path: Path) -> None:
     assert engine.last_error("AAPL") is None
     engine.scan_once()
     assert engine.latest_bars("AAPL") is not None
+
+
+# ---------------------------------------------------------- multi-account
+
+
+def test_signals_execute_in_every_auto_trading_account(tmp_path: Path) -> None:
+    """Users share the strategies but keep independent paper accounts; only auto-trading accounts execute."""
+    engine, received, events, clock = make_engine(tmp_path, [always_buy()], watchlist=("AAPL",), trading=True)
+    engine.accounts.ensure("bob", enabled=True)
+    engine.accounts.ensure("carol", enabled=False)
+    signals = engine.scan_once()
+    assert len(signals) == 1 and len(received) == 1  # one signal, one notification
+    admin, bob, carol = (engine.accounts.get(n) for n in (engine.accounts.default_name, "bob", "carol"))
+    assert admin is not None and bob is not None and carol is not None
+    assert admin.position("AAPL") is not None and bob.position("AAPL") is not None
+    assert carol.position("AAPL") is None  # auto-trading off: notified only
+    fills = engine.storage.recent_fills()
+    assert sorted(f["account"] for f in fills) == sorted([engine.accounts.default_name, "bob"])
+    assert [f["account"] for f in engine.storage.fills_for_account("bob")] == ["bob"]
+    assert engine.storage.recent_fills(account="carol") == []
+
+    # Enabling Carol later: she joins on the next (new-bar) signal without touching the others.
+    engine.accounts.set_enabled("carol", True)
+    clock.advance(300)
+    engine.scan_once()
+    assert carol.position("AAPL") is not None
+    admin_pos = admin.position("AAPL")
+    assert admin_pos is not None and admin_pos.quantity == fills[0]["quantity"]
+
+
+def test_protective_exits_are_evaluated_per_account(tmp_path: Path) -> None:
+    engine, received, events, clock = make_engine(tmp_path, [always_buy("x", enabled=False)], watchlist=("AAPL",), trading=True)
+    engine.scan_once()
+    price = last_close(engine, "AAPL")
+    bob = engine.accounts.ensure("bob", enabled=True)
+    # Bob's position has a stop that is already breached; the admin's has a harmless one.
+    bob.submit_market_order("AAPL", "BUY", 5, price, strategy="manual", stop_loss=price * 1.5)
+    engine.broker.submit_market_order("AAPL", "BUY", 5, price, strategy="manual", stop_loss=price * 0.5)
+    clock.advance(300)
+    signals = engine.scan_once()
+    assert len(signals) == 1 and signals[0].account == "bob" and "Stop loss" in signals[0].reason
+    assert bob.position("AAPL") is None
+    assert engine.broker.position("AAPL") is not None  # untouched
+    sells = [f for f in engine.storage.recent_fills() if f["side"] == "SELL"]
+    assert [f["account"] for f in sells] == ["bob"]
+    assert signals[0].to_dict()["account"] == "bob"
+
+
+def test_account_manager_persists_per_user_state(tmp_path: Path) -> None:
+    from trading_bot.broker import AccountManager
+
+    manager = AccountManager(1_000.0, data_dir=tmp_path, default_name="admin")
+    bob = manager.ensure("bob", enabled=False)
+    bob.submit_market_order("AAPL", "BUY", 2, 100.0)
+    assert manager.is_enabled("bob") is False and manager.is_enabled("nobody") is False
+    assert manager.names() == ["bob"]
+    assert manager.default is manager.get("admin")
+    assert [name for name, _ in manager.enabled()] == ["admin"]
+    assert (tmp_path / "accounts" / "bob.json").exists()
+    # A second manager on the same directory restores Bob's positions.
+    again = AccountManager(1_000.0, data_dir=tmp_path, default_name="admin").ensure("bob")
+    pos = again.position("AAPL")
+    assert pos is not None and pos.quantity == 2 and again.cash() == pytest.approx(800.0)
+    # Names are sanitised for the file system.
+    manager.ensure("../evil name").submit_market_order("X", "BUY", 1, 1.0)
+    assert (tmp_path / "accounts" / ".._evil_name.json").exists()  # stays inside the accounts directory
+    manager.remove("bob")
+    assert "bob" not in manager.names()
+
+
+# ------------------------------------------------- execution model & manual trading
+
+
+def test_paper_fills_apply_slippage_commission_and_ledger(tmp_path: Path) -> None:
+    engine, received, events, clock = make_engine(tmp_path, [always_buy()], watchlist=("AAPL",), trading=True)
+    engine.config.execution.slippage_model = "fixed"
+    engine.config.execution.slippage_bps = 10
+    engine.config.execution.commission_per_order = 2.5
+    signals = engine.scan_once()
+    fill = engine.storage.recent_fills()[0]
+    assert fill["price"] == pytest.approx(signals[0].price * 1.001) and fill["commission"] == 2.5
+    pos = engine.broker.position("AAPL")
+    assert pos is not None and pos.quantity * fill["price"] + 2.5 <= 100_000 * 0.1 + fill["price"]  # sized to the budget
+    ledger = engine.storage.transactions(engine.accounts.default_name)
+    assert len(ledger) == 1 and ledger[0]["kind"] == "buy" and ledger[0]["fee"] == 2.5
+    assert ledger[0]["amount"] == pytest.approx(-(pos.quantity * fill["price"] + 2.5))
+    assert ledger[0]["balance_after"] == pytest.approx(engine.broker.cash()) and ledger[0]["reference"] == fill["id"]
+    assert ledger[0]["metadata"]["source"] == "signal" and ledger[0]["symbol"] == "AAPL"
+
+
+def test_resting_limit_orders_fill_during_scans(tmp_path: Path) -> None:
+    from trading_bot.engine import OrderEvent
+
+    engine, received, events, clock = make_engine(tmp_path, [always_buy("x", enabled=False)], watchlist=("AAPL",), trading=True)
+    engine.scan_once()
+    price = last_close(engine, "AAPL")
+    broker = engine.broker
+    assert isinstance(broker, PaperBroker)
+    far = broker.submit_limit_order("AAPL", "BUY", 3, price * 0.5, strategy="manual")   # never reached
+    near = broker.submit_limit_order("AAPL", "BUY", 2, price * 1.5, strategy="manual")  # marketable on the next bar
+    clock.advance(300)
+    engine.scan_once()
+    assert [o.id for o in broker.pending_orders()] == [far.id]
+    pos = broker.position("AAPL")
+    assert pos is not None and pos.quantity == 2 and pos.avg_price == pytest.approx(price * 1.5)
+    fills = engine.storage.recent_fills()
+    assert len(fills) == 1 and fills[0]["side"] == "BUY" and fills[0]["quantity"] == 2
+    ledger = engine.storage.transactions(engine.accounts.default_name)
+    assert ledger[0]["metadata"]["source"] == "limit order"
+    order_events = [e for e in events if isinstance(e, OrderEvent)]
+    assert order_events and order_events[-1].kind == "filled" and order_events[-1].symbol == "AAPL"
+    assert any(isinstance(e, PositionsChanged) and e.account == engine.accounts.default_name for e in events)
+    # No new bar -> pending orders are not re-evaluated (and nothing crashes).
+    engine.scan_once()
+    assert [o.id for o in broker.pending_orders()] == [far.id]
+    assert near.id not in {o.id for o in broker.pending_orders()}
+
+
+def test_order_service_simulate_place_close_cancel(tmp_path: Path) -> None:
+    from trading_bot.engine import OrderEvent
+    from trading_bot.execution import OrderRequest
+    from trading_bot.trading import OrderError, OrderService
+
+    clock = FakeClock(1_750_000_000.0)
+    engine, received, events, clock = make_engine(tmp_path, [always_buy("x", enabled=False)], watchlist=("AAPL",), trading=True,
+                                                  clock=clock, provider=FailingProvider(clock=clock.datetime))
+    engine.config.execution.commission_per_order = 1.0
+    service = OrderService(engine)
+    broker = engine.broker
+    # Symbols outside the watchlist are fetched on demand for the snapshot.
+    snapshot = service.snapshot("MSFT")
+    assert snapshot.price > 0 and snapshot.bars > 0
+    with pytest.raises(OrderError) as bad:
+        service.simulate(broker, OrderRequest("AAPL", "BUY", 0))
+    assert bad.value.status == 422
+    sim = service.simulate(broker, OrderRequest("AAPL", "BUY", 10))
+    assert sim.accepted and sim.commission == 1.0
+
+    result = service.place("admin", broker, OrderRequest("AAPL", "BUY", 10, stop_loss_pct=5))
+    assert result.status == "filled" and result.fill is not None and result.fill["quantity"] == 10
+    assert result.transaction is not None and result.transaction["kind"] == "buy" and result.transaction["metadata"]["source"] == "manual"
+    pos = broker.position("AAPL")
+    assert pos is not None and pos.stop_loss == pytest.approx(result.fill["price"] * 0.95) and pos.strategy == "manual"
+    assert any(isinstance(e, OrderEvent) and e.kind == "filled" for e in events)
+    with pytest.raises(OrderError) as too_many:
+        service.place("admin", broker, OrderRequest("AAPL", "SELL", 11))
+    assert too_many.value.status == 409 and "only 10 held" in str(too_many.value)
+
+    # Non-marketable limit orders rest; marketable ones fill at once.
+    resting = service.place("admin", broker, OrderRequest("AAPL", "BUY", 1, "limit", 1.0))
+    assert resting.status == "pending" and resting.order is not None and resting.order["limit_price"] == 1.0
+    assert any(isinstance(e, OrderEvent) and e.kind == "placed" for e in events)
+    immediate = service.place("admin", broker, OrderRequest("AAPL", "BUY", 1, "limit", snapshot.price * 10))
+    assert immediate.status == "filled" and immediate.fill is not None and immediate.fill["price"] <= snapshot.price * 10
+    cancelled = service.cancel_order("admin", broker, resting.order["id"])
+    assert cancelled.id == resting.order["id"] and broker.pending_orders() == []
+    with pytest.raises(OrderError) as missing:
+        service.cancel_order("admin", broker, "nope")
+    assert missing.value.status == 404
+
+    closed = service.close_position("admin", broker, "aapl")
+    assert closed.status == "filled" and closed.fill is not None and closed.fill["side"] == "SELL" and closed.fill["quantity"] == 11
+    assert broker.position("AAPL") is None
+    with pytest.raises(OrderError) as none_left:
+        service.close_position("admin", broker, "AAPL")
+    assert none_left.value.status == 404
+    kinds = [t["kind"] for t in engine.storage.transactions("admin", newest_first=False)]
+    assert kinds == ["buy", "buy", "sell"]
+    with pytest.raises(OrderError) as unknown:
+        service.snapshot("BAD")  # the provider rejects this symbol
+    assert unknown.value.status == 409 and "no such symbol" in str(unknown.value)
+
+
+def test_two_strategies_same_bar_open_one_position(tmp_path: Path) -> None:
+    """Two strategies signalling the same symbol on one bar: both are notified, only the first executes."""
+    defs = [always_buy("first"), always_buy("second")]
+    engine, received, events, clock = make_engine(tmp_path, defs, watchlist=("AAPL",), trading=True)
+    signals = engine.scan_once()
+    assert [s.strategy for s in signals] == ["first", "second"] and len(received) == 2
+    pos = engine.broker.position("AAPL")
+    assert pos is not None and pos.strategy == "first"
+    executed = {row["strategy"]: bool(row["executed"]) for row in engine.storage.recent_signals()}
+    assert executed == {"first": True, "second": False}
+    assert len(engine.storage.recent_fills()) == 1

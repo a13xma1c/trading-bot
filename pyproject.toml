@@ -37,8 +37,9 @@ build-backend = "setuptools.build_meta"
 include = ["trading_bot*"]
 
 [tool.setuptools.package-data]
-# The web UI (HTML/CSS/JS) must ship inside the wheel; Python files alone are not enough.
+# Non-Python assets must be listed explicitly to ship inside the wheel.
 "trading_bot.web" = ["static/*.html", "static/css/*.css", "static/js/*.js"]
+"trading_bot.data" = ["symbols.csv"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -50,7 +51,7 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "B", "UP", "I"]
-ignore = ["E501", "B905"]
+ignore = ["E501", "B905", "B008"]  # B008: FastAPI's `Depends()` in defaults is the intended idiom
 
 [tool.mypy]
 python_version = "3.12"

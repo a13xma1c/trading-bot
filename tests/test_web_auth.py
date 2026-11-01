@@ -12,6 +12,8 @@ from trading_bot.web.auth import (
     SessionSigner,
     hash_password,
     load_or_create_secret,
+    password_rules,
+    password_score,
     validate_password_strength,
     verify_password,
 )
@@ -32,10 +34,32 @@ def test_hash_and_verify_password() -> None:
         hash_password("")
 
 
-def test_password_strength() -> None:
-    assert validate_password_strength("short") is not None
-    assert validate_password_strength(" padded pass ") is not None
-    assert validate_password_strength("long enough") is None
+def test_password_strength_rules() -> None:
+    assert validate_password_strength("Correct-Horse-7") is None
+    assert validate_password_strength("Very-long-and-strong-42!") is None
+    failing = {
+        "short": "At least 10 characters",
+        "long enough password": "An uppercase letter",
+        "LONGENOUGHPASS1!": "A lowercase letter",
+        "Longenough-pass!": "A digit",
+        "Longenoughpass1": "A symbol",
+        " Padded-pass-1! ": "No leading or trailing spaces",
+        "Password123!": "Not a commonly used password",
+        "x" * 129 + "A1!": "At most 128 characters",
+    }
+    for password, expected in failing.items():
+        problem = validate_password_strength(password)
+        assert problem is not None and expected in problem, (password, problem)
+    assert "Does not contain the username" in (validate_password_strength("Admin-Trading-99!", "admin") or "")
+    assert validate_password_strength("Admin-Trading-99!", "bob") is None
+    assert validate_password_strength("Ab-Trading-99!", "ab") is None  # very short usernames are ignored
+
+    rules = password_rules("abc", "alice")
+    assert [r["id"] for r in rules][:3] == ["length", "lowercase", "uppercase"]
+    assert {r["id"]: r["passed"] for r in rules}["lowercase"] is True
+    assert {r["id"]: r["passed"] for r in rules}["length"] is False
+    assert password_score("abc") <= 2 and password_score("Correct-Horse-7") == 3
+    assert password_score("Very-long-and-strong-42!") == 4
 
 
 def test_session_signer_roundtrip_expiry_and_binding(tmp_path: Path) -> None:

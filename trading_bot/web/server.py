@@ -17,9 +17,9 @@ import threading
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import asdict
-from datetime import datetime
-from pathlib import Path
+from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import quote
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.gzip import GZipMiddleware
@@ -29,35 +29,49 @@ from pydantic import BaseModel, Field
 from starlette.requests import Request
 
 from .. import __version__
+from ..analytics import AIInsightsClient, build_report
 from ..backtest import run_backtest
-from ..broker import PaperBroker
+from ..broker import BrokerError, PaperBroker
+from ..brokers import create_broker
 from ..config import PROVIDER_BUDGETS, VALID_INTERVALS, AppConfig, ConfigError
 from ..data import ProviderError, RateLimitError
+from ..data.symbols import SymbolDirectory
 from ..engine import (
     BarsUpdated,
     EngineStateChanged,
     Event,
     FetchFailed,
+    OrderEvent,
     PositionsChanged,
     ScanCompleted,
     SignalEvent,
     StatusEvent,
     TradingEngine,
+    WalletChanged,
 )
+from ..fx import FxService, create_fx_provider
 from ..notify import WebhookChannel
+from ..payments import PaymentError, create_payment_provider
 from ..strategy import RuleStrategy, Signal, Strategy, StrategyDefinition, function_help
+from ..trading import OrderService
+from ..wallet import WalletService
 from .auth import (
     LoginThrottle,
     SessionSigner,
-    hash_password,
     load_or_create_secret,
-    validate_password_strength,
-    verify_password,
+    password_rules,
+    password_score,
 )
 from .charting import bars_payload, marker_indices, overlay_payload
+from .context import WebContext
+from .mail import Mailer
+from .paths import STATIC_DIR
+from .routes_fx import build_fx_router
+from .routes_trading import build_trading_router, pending_payload
+from .routes_wallet import build_wallet_router
+from .users import User, UserError, UserService
 
 logger = logging.getLogger(__name__)
-STATIC_DIR = Path(__file__).parent / "static"
 SESSION_COOKIE = "tb_session"
 
 
@@ -161,7 +175,13 @@ def serialize_event(event: Event, engine: TradingEngine) -> dict[str, Any] | Non
     if isinstance(event, FetchFailed):
         return {"type": "fetch_failed", "symbol": event.symbol, "message": event.message, "has_cache": event.has_cache}
     if isinstance(event, PositionsChanged):
-        return {"type": "positions"}
+        return {"type": "positions", "account": event.account}
+    if isinstance(event, OrderEvent):
+        return {"type": "order", "account": event.account, "kind": event.kind, "symbol": event.symbol, "side": event.side,
+                "quantity": event.quantity, "price": event.price, "message": event.message}
+    if isinstance(event, WalletChanged):
+        return {"type": "wallet", "account": event.account, "kind": event.kind, "amount": event.amount,
+                "status": event.status}
     if isinstance(event, EngineStateChanged):
         return {"type": "engine", "running": event.running, "status": status_payload(engine)}
     return None
@@ -197,14 +217,16 @@ def status_payload(engine: TradingEngine) -> dict[str, Any]:
         "errors_by_symbol": engine.snapshot()["errors_by_symbol"],
         "requires_api_key": cfg.requires_api_key() and not cfg.data.api_key,
         "api_key_set": bool(cfg.data.api_key),
+        "account_currency": cfg.payments.currency,
     }
 
 
-def watchlist_payload(engine: TradingEngine) -> list[dict[str, Any]]:
+def watchlist_payload(engine: TradingEngine, directory: SymbolDirectory | None = None) -> list[dict[str, Any]]:
     rows = []
     for symbol in engine.watchlist:
         result = engine.latest_bars(symbol) or engine.data.cached_bars(symbol, engine.config.data.interval)
-        row: dict[str, Any] = {"symbol": symbol, "price": None, "change_pct": None, "time": None,
+        row: dict[str, Any] = {"symbol": symbol, "name": directory.name(symbol) if directory else None,
+                               "price": None, "change_pct": None, "time": None,
                                "stale": False, "error": engine.last_error(symbol)}
         if result is not None and not result.empty:
             last = result.bars.iloc[-1]
@@ -229,21 +251,30 @@ def plugin_payload(strategy: Strategy) -> dict[str, Any]:
             "buy_rule": "", "sell_rule": "", "params": {}}
 
 
-def positions_payload(engine: TradingEngine) -> dict[str, Any]:
-    broker = engine.broker
+def positions_payload(engine: TradingEngine, account: str | None = None, broker: Any = None) -> dict[str, Any]:
+    broker = broker if broker is not None else engine.broker
+    account = account if account is not None else engine.accounts.default_name
     prices = engine.latest_prices()
     rows = []
-    for symbol, pos in sorted(broker.positions().items()):
-        last = prices.get(symbol, pos.avg_price)
-        rows.append({"symbol": symbol, "quantity": pos.quantity, "avg_price": pos.avg_price, "last": last,
-                     "pnl": pos.unrealized_pnl(last), "pnl_pct": pos.unrealized_pnl_pct(last),
-                     "stop_loss": pos.stop_loss, "take_profit": pos.take_profit, "strategy": pos.strategy,
-                     "opened_at": pos.opened_at.isoformat()})
-    account = {"cash": broker.cash(), "equity": broker.equity(prices), "open_positions": len(rows),
-               "paper": isinstance(broker, PaperBroker),
-               "realized_pnl": broker.realized_pnl() if isinstance(broker, PaperBroker) else None}
-    fills = engine.storage.recent_fills(100)
-    return {"account": account, "positions": rows, "fills": fills}
+    error: str | None = None
+    try:
+        for symbol, pos in sorted(broker.positions().items()):
+            last = prices.get(symbol, pos.avg_price)
+            rows.append({"symbol": symbol, "quantity": pos.quantity, "avg_price": pos.avg_price, "last": last,
+                         "pnl": pos.unrealized_pnl(last), "pnl_pct": pos.unrealized_pnl_pct(last),
+                         "stop_loss": pos.stop_loss, "take_profit": pos.take_profit, "strategy": pos.strategy,
+                         "opened_at": pos.opened_at.isoformat()})
+        cash, equity = broker.cash(), broker.equity(prices)
+    except BrokerError as exc:  # an external brokerage that is down must not break the page
+        logger.warning("[%s] broker unavailable: %s", account, exc)
+        error, cash, equity, rows = str(exc), None, None, []
+    summary = {"name": account, "cash": cash, "equity": equity, "open_positions": len(rows),
+               "paper": broker.is_paper, "broker": broker.describe(), "error": error,
+               "realized_pnl": broker.realized_pnl() if isinstance(broker, PaperBroker) else None,
+               "initial_cash": broker.initial_cash if isinstance(broker, PaperBroker) else None,
+               "auto_trade": engine.accounts.is_enabled(account), "currency": engine.config.payments.currency}
+    fills = engine.storage.recent_fills(100, account=account)
+    return {"account": summary, "positions": rows, "fills": fills, "pending_orders": pending_payload(broker)}
 
 
 def _finite(value: float) -> float | None:
@@ -297,19 +328,39 @@ class BacktestBody(BaseModel):
 
 
 class LoginBody(BaseModel):
-    username: str = Field(min_length=1, max_length=64)
+    username: str = Field(min_length=1, max_length=254, description="username or e-mail address")
     password: str = Field(min_length=1, max_length=256)
 
 
 class SetupBody(LoginBody):
+    email: str | None = Field(default=None, max_length=254)
     provider: str | None = None   # optional: choose the market-data source during account creation
     api_key: str | None = None    # optional: API key for that provider (can be added later in Settings)
+
+
+class SignupBody(BaseModel):
+    username: str = Field(min_length=1, max_length=64)
+    email: str | None = Field(default=None, max_length=254)
+    password: str = Field(min_length=1, max_length=256)
+
+
+class ResendBody(BaseModel):
+    identifier: str = Field(min_length=1, max_length=254)
+
+
+class PasswordCheckBody(BaseModel):
+    password: str = Field(max_length=512)
+    username: str | None = Field(default=None, max_length=64)
 
 
 class PasswordChangeBody(BaseModel):
     current_password: str = Field(min_length=1, max_length=256)
     new_password: str = Field(min_length=1, max_length=256)
-    username: str | None = Field(default=None, max_length=64)
+
+
+class ProfileBody(BaseModel):
+    email: str | None = Field(default=None, max_length=254)
+    auto_trade: bool | None = None
 
 
 class ProviderBody(BaseModel):
@@ -323,6 +374,11 @@ class SettingsBody(BaseModel):
     market_hours: dict[str, Any] | None = None
     notifications: dict[str, Any] | None = None
     trading: dict[str, Any] | None = None
+    ai: dict[str, Any] | None = None
+    web: dict[str, Any] | None = None
+    execution: dict[str, Any] | None = None
+    payments: dict[str, Any] | None = None
+    fx: dict[str, Any] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -339,6 +395,42 @@ def create_app(engine: TradingEngine, config_path: str | None = None, token: str
     sessions = sessions or SessionSigner(secret, config.web.session_hours * 3600)
     throttle = throttle or LoginThrottle()
     base_path = config.web.base_path
+    symbols = SymbolDirectory.load(config.symbols_file_path)
+    mailer = Mailer(config.notifications.email, outbox_dir=config.data_dir_path / "outbox")
+    users = UserService(engine.storage, config, mailer)
+    if config.web.password_hash:
+        users.migrate_legacy_admin()
+        if config_path:
+            config.save(config_path)  # the hash now lives in the user store only
+    for existing in users.list():  # every user has a paper account; signals execute where auto-trade is on
+        engine.accounts.ensure(existing.username, enabled=existing.auto_trade)
+        if existing.broker_connected:
+            try:
+                engine.accounts.set_broker(existing.username, create_broker(
+                    existing.broker_provider, existing.broker_key or "", existing.broker_secret or "", existing.broker_paper))
+            except BrokerError as exc:
+                logger.error("User %r: could not connect %s (%s); using the paper account", existing.username,
+                             existing.broker_provider, exc)
+    ai = AIInsightsClient(config.ai)
+
+    def _build_fx() -> FxService | None:
+        try:
+            return FxService(create_fx_provider(config.fx.provider), config.fx)
+        except Exception as exc:  # noqa: BLE001 - never block startup on an optional feature
+            logger.error("Exchange rates disabled: %s", exc)
+            return None
+
+    def _build_payments() -> Any:
+        try:
+            return create_payment_provider(config.payments, checkout_base="")
+        except PaymentError as exc:
+            logger.error("Payments disabled: %s", exc)
+            return None
+
+    fx_service = _build_fx()
+    payments = _build_payments()
+    wallet = WalletService(engine.storage, engine.accounts, config.payments, payments, fx_service, engine.bus)
+    orders = OrderService(engine)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -358,131 +450,10 @@ def create_app(engine: TradingEngine, config_path: str | None = None, token: str
     app.state.engine = engine
     app.state.broadcaster = broadcaster
     app.state.sessions = sessions
-
-    # ------------------------------------------------------------- auth
-    def _setup_required() -> bool:
-        return not config.web.password_hash
-
-    def _token_ok(provided: str | None) -> bool:
-        return bool(api_token and provided and secrets.compare_digest(provided, api_token))
-
-    def _bearer(request: Request) -> str | None:
-        header = request.headers.get("authorization", "")
-        return header[7:] if header.lower().startswith("bearer ") else request.query_params.get("token")
-
-    def _authenticated(request: Request) -> str | None:
-        """Username of the caller, or None.  Accepts a session cookie or the API bearer token."""
-        username = sessions.verify(request.cookies.get(SESSION_COOKIE), config.web.password_hash)
-        if username is not None:
-            return username
-        if _token_ok(_bearer(request)):
-            return "api-token"
-        return None
-
-    async def require_auth(request: Request) -> str:
-        user = _authenticated(request)
-        if user is None:
-            raise HTTPException(status_code=401, detail="Authentication required")
-        return user
-
-    def _client_key(request: Request) -> str:
-        return request.client.host if request.client else "unknown"
-
-    def _cookie_path() -> str:
-        return (base_path or "") + "/"
-
-    def _set_session_cookie(response: Response, request: Request, token: str) -> None:
-        secure = request.url.scheme == "https" or request.headers.get("x-forwarded-proto", "") == "https"
-        response.set_cookie(SESSION_COOKIE, token, max_age=int(config.web.session_hours * 3600), httponly=True,
-                            samesite="lax", secure=secure, path=_cookie_path())
-
-    def _issue_session(response: Response, request: Request) -> str:
-        token = sessions.issue(config.web.username, config.web.password_hash)
-        _set_session_cookie(response, request, token)
-        return token
-
-    auth: list[Any] = [Depends(require_auth)]
-
-    def _provider_options() -> dict[str, Any]:
-        return {"providers": [{"name": name, "requires_api_key": name in ("alphavantage", "twelvedata"),
-                               "per_minute": budget[0], "per_day": budget[1]}
-                              for name, budget in PROVIDER_BUDGETS.items()],
-                "provider": config.data.provider, "api_key_set": bool(config.data.api_key)}
-
-    @app.get("/api/auth/status")
-    def auth_status(request: Request) -> dict[str, Any]:
-        user = _authenticated(request)
-        return {"authenticated": user is not None, "username": user, "setup_required": _setup_required(),
-                "configured_username": config.web.username, **_provider_options()}
-
-    @app.post("/api/auth/setup", status_code=201)
-    def auth_setup(body: SetupBody, request: Request, response: Response) -> dict[str, Any]:
-        """First run only: create the administrator credentials."""
-        if not _setup_required():
-            raise HTTPException(status_code=409, detail="A password is already configured")
-        problem = validate_password_strength(body.password)
-        if problem:
-            raise HTTPException(status_code=422, detail=problem)
-        if body.provider is not None and body.provider not in PROVIDER_BUDGETS:
-            raise HTTPException(status_code=422, detail=f"Unknown provider {body.provider!r}")
-        config.web.username = body.username.strip()
-        config.web.password_hash = hash_password(body.password)
-        data_changed = False
-        if body.provider is not None and body.provider != config.data.provider:
-            config.data.provider = body.provider
-            data_changed = True
-        if body.api_key is not None and body.api_key.strip() and body.api_key.strip() != config.data.api_key:
-            config.data.api_key = body.api_key.strip()
-            data_changed = True
-        _save_config()
-        if data_changed:
-            _apply_data_settings()
-        _issue_session(response, request)
-        logger.info("Administrator account %r created (provider %s)", config.web.username, config.data.provider)
-        return {"authenticated": True, "username": config.web.username, "status": status_payload(engine)}
-
-    @app.post("/api/auth/login")
-    def auth_login(body: LoginBody, request: Request, response: Response) -> dict[str, Any]:
-        if _setup_required():
-            raise HTTPException(status_code=409, detail="No password configured yet; complete the setup first")
-        key = _client_key(request)
-        wait = throttle.retry_after(key)
-        if wait > 0:
-            raise HTTPException(status_code=429, detail=f"Too many failed attempts; try again in {int(wait) + 1}s",
-                                headers={"Retry-After": str(int(wait) + 1)})
-        ok = secrets.compare_digest(body.username.strip(), config.web.username) and \
-            verify_password(body.password, config.web.password_hash)
-        if not ok:
-            locked = throttle.record_failure(key)
-            logger.warning("Failed login for %r from %s", body.username, key)
-            if locked:
-                raise HTTPException(status_code=429, detail=f"Too many failed attempts; try again in {int(locked)}s",
-                                    headers={"Retry-After": str(int(locked))})
-            raise HTTPException(status_code=401, detail="Invalid username or password")
-        throttle.record_success(key)
-        _issue_session(response, request)
-        logger.info("User %r logged in from %s", config.web.username, key)
-        return {"authenticated": True, "username": config.web.username}
-
-    @app.post("/api/auth/logout")
-    def auth_logout(request: Request, response: Response) -> dict[str, Any]:
-        sessions.revoke(request.cookies.get(SESSION_COOKIE))
-        response.delete_cookie(SESSION_COOKIE, path=_cookie_path())
-        return {"authenticated": False}
-
-    @app.post("/api/auth/password", dependencies=auth)
-    def auth_change_password(body: PasswordChangeBody, request: Request, response: Response) -> dict[str, Any]:
-        if not verify_password(body.current_password, config.web.password_hash):
-            raise HTTPException(status_code=401, detail="Current password is incorrect")
-        problem = validate_password_strength(body.new_password)
-        if problem:
-            raise HTTPException(status_code=422, detail=problem)
-        if body.username and body.username.strip():
-            config.web.username = body.username.strip()
-        config.web.password_hash = hash_password(body.new_password)
-        _save_config()
-        _issue_session(response, request)  # tokens are bound to the password hash: all others are now invalid
-        return {"ok": True, "username": config.web.username}
+    app.state.symbols = symbols
+    app.state.users = users
+    app.state.mailer = mailer
+    app.state.ai = ai
 
     def _bars_for(symbol: str) -> Any:
         result = engine.latest_bars(symbol) or engine.data.cached_bars(symbol, config.data.interval)
@@ -506,6 +477,239 @@ def create_app(engine: TradingEngine, config_path: str | None = None, token: str
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         for symbol in engine.watchlist:
             engine.fetch_in_background(symbol)
+
+    # ------------------------------------------------------------- auth
+    def _setup_required() -> bool:
+        return users.setup_required()
+
+    def _token_ok(provided: str | None) -> bool:
+        return bool(api_token and provided and secrets.compare_digest(provided, api_token))
+
+    def _bearer(request: Request) -> str | None:
+        header = request.headers.get("authorization", "")
+        return header[7:] if header.lower().startswith("bearer ") else request.query_params.get("token")
+
+    def _user_from_cookie(token: str | None) -> User | None:
+        username = sessions.peek_username(token)
+        if not username:
+            return None
+        user = users.find(username)
+        if user is None or sessions.verify(token, user.password_hash) is None:
+            return None
+        return user
+
+    def _authenticated(request: Request) -> User | None:
+        """The signed-in user (session cookie), or a synthetic user for the API bearer token."""
+        user = _user_from_cookie(request.cookies.get(SESSION_COOKIE))
+        if user is not None:
+            return user
+        if _token_ok(_bearer(request)):
+            admin = next((u for u in users.list() if u.is_admin), None)
+            return admin or User(0, "api-token", None, "", "admin", True, False, "")
+        return None
+
+    async def require_auth(request: Request) -> User:
+        user = _authenticated(request)
+        if user is None:
+            raise HTTPException(status_code=401, detail="Authentication required")
+        return user
+
+    def _client_key(request: Request) -> str:
+        return request.client.host if request.client else "unknown"
+
+    def _cookie_path() -> str:
+        return (base_path or "") + "/"
+
+    def _external_base(request: Request) -> str:
+        if config.web.public_url:
+            return config.web.public_url.rstrip("/") + base_path
+        proto = request.headers.get("x-forwarded-proto", request.url.scheme)
+        host = request.headers.get("x-forwarded-host", request.headers.get("host", request.url.netloc))
+        return f"{proto}://{host}{base_path}"
+
+    def _set_session_cookie(response: Response, request: Request, token: str) -> None:
+        secure = request.url.scheme == "https" or request.headers.get("x-forwarded-proto", "") == "https"
+        response.set_cookie(SESSION_COOKIE, token, max_age=int(config.web.session_hours * 3600), httponly=True,
+                            samesite="lax", secure=secure, path=_cookie_path())
+
+    def _issue_session(response: Response, request: Request, user: User) -> str:
+        token = sessions.issue(user.username, user.password_hash)
+        _set_session_cookie(response, request, token)
+        return token
+
+    def _user_error(exc: UserError) -> HTTPException:
+        return HTTPException(status_code=exc.status, detail=str(exc))
+
+    def _account_of(user: User) -> Any:
+        return engine.accounts.ensure(user.username, enabled=user.auto_trade)
+
+    auth: list[Any] = [Depends(require_auth)]
+
+    ctx = WebContext(engine=engine, config=config, users=users, require_auth=require_auth, account_of=_account_of,
+                     external_base=_external_base, save_config=_save_config, orders=orders, wallet=wallet, fx=fx_service,
+                     payments=payments)
+    app.state.context = ctx
+    app.include_router(build_trading_router(ctx))
+    app.include_router(build_wallet_router(ctx))
+    app.include_router(build_fx_router(ctx))
+
+    def _provider_options() -> dict[str, Any]:
+        return {"providers": [{"name": name, "requires_api_key": name in ("alphavantage", "twelvedata"),
+                               "per_minute": budget[0], "per_day": budget[1]}
+                              for name, budget in PROVIDER_BUDGETS.items()],
+                "provider": config.data.provider, "api_key_set": bool(config.data.api_key)}
+
+    @app.get("/api/auth/status")
+    def auth_status(request: Request) -> dict[str, Any]:
+        user = _authenticated(request)
+        return {"authenticated": user is not None, "username": user.username if user else None,
+                "user": user.public() if user else None, "setup_required": _setup_required(),
+                "allow_signup": config.web.allow_signup and not _setup_required(),
+                "verification_required": users.verification_required,
+                "email_configured": mailer.configured, **_provider_options()}
+
+    @app.post("/api/auth/password-check")
+    def auth_password_check(body: PasswordCheckBody) -> dict[str, Any]:
+        """Per-rule evaluation for live feedback while typing (the same rules gate setup and changes)."""
+        rules = password_rules(body.password, body.username)
+        return {"rules": rules, "passed": all(r["passed"] for r in rules), "score": password_score(body.password, body.username)}
+
+    @app.post("/api/auth/setup", status_code=201)
+    def auth_setup(body: SetupBody, request: Request, response: Response) -> dict[str, Any]:
+        """First run only: create the administrator account (and optionally the data provider)."""
+        if not _setup_required():
+            raise HTTPException(status_code=409, detail="An administrator account already exists")
+        if body.provider is not None and body.provider not in PROVIDER_BUDGETS:
+            raise HTTPException(status_code=422, detail=f"Unknown provider {body.provider!r}")
+        try:
+            user, _pending = users.register(body.username, body.email, body.password, role="admin")
+        except UserError as exc:
+            raise _user_error(exc) from exc
+        config.web.username = user.username
+        config.web.password_hash = ""  # credentials now live in the user store
+        data_changed = False
+        if body.provider is not None and body.provider != config.data.provider:
+            config.data.provider = body.provider
+            data_changed = True
+        if body.api_key is not None and body.api_key.strip() and body.api_key.strip() != config.data.api_key:
+            config.data.api_key = body.api_key.strip()
+            data_changed = True
+        _save_config()
+        if data_changed:
+            _apply_data_settings()
+        engine.accounts.default_name = user.username
+        _account_of(user)
+        _issue_session(response, request, user)
+        logger.info("Administrator account %r created (provider %s)", user.username, config.data.provider)
+        return {"authenticated": True, "username": user.username, "user": user.public(), "status": status_payload(engine)}
+
+    @app.post("/api/auth/signup", status_code=201)
+    def auth_signup(body: SignupBody, request: Request, response: Response) -> dict[str, Any]:
+        """Create a user account; sends a verification e-mail when verification is enabled."""
+        if _setup_required():
+            raise HTTPException(status_code=409, detail="Complete the initial setup first")
+        if not config.web.allow_signup:
+            raise HTTPException(status_code=403, detail="Sign-up is disabled on this server")
+        key = _client_key(request)
+        if throttle.retry_after(key) > 0:
+            raise HTTPException(status_code=429, detail="Too many attempts; try again later")
+        try:
+            user, pending = users.register(body.username, body.email, body.password, base_url=_external_base(request))
+        except UserError as exc:
+            raise _user_error(exc) from exc
+        except RuntimeError as exc:  # mail delivery failed
+            raise HTTPException(status_code=503, detail=f"Could not send the verification e-mail: {exc}") from exc
+        _account_of(user)
+        if pending:
+            return {"authenticated": False, "verification_required": True, "email": user.email, "username": user.username}
+        _issue_session(response, request, user)
+        return {"authenticated": True, "verification_required": False, "username": user.username, "user": user.public()}
+
+    @app.post("/api/auth/resend-verification")
+    def auth_resend(body: ResendBody, request: Request) -> dict[str, Any]:
+        key = _client_key(request)
+        if throttle.retry_after(key) > 0:
+            raise HTTPException(status_code=429, detail="Too many attempts; try again later")
+        try:
+            sent = users.resend_verification(body.identifier, base_url=_external_base(request))
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=f"Could not send the verification e-mail: {exc}") from exc
+        if not sent:
+            throttle.record_failure(key)
+        # Do not reveal whether an account exists.
+        return {"ok": True, "message": "If the account exists and is not verified yet, a new link has been sent."}
+
+    @app.get("/verify", include_in_schema=False)
+    def verify_email(token: str = Query(default="")) -> Response:
+        try:
+            users.verify(token)
+        except UserError as exc:
+            return RedirectResponse(f"login?verify_error={quote(str(exc))}", status_code=302)
+        return RedirectResponse("login?verified=1", status_code=302)
+
+    @app.post("/api/auth/login")
+    def auth_login(body: LoginBody, request: Request, response: Response) -> dict[str, Any]:
+        if _setup_required():
+            raise HTTPException(status_code=409, detail="No account configured yet; complete the setup first")
+        key = _client_key(request)
+        wait = throttle.retry_after(key)
+        if wait > 0:
+            raise HTTPException(status_code=429, detail=f"Too many failed attempts; try again in {int(wait) + 1}s",
+                                headers={"Retry-After": str(int(wait) + 1)})
+        try:
+            user = users.authenticate(body.username, body.password)
+        except UserError as exc:
+            if exc.status == 401:
+                locked = throttle.record_failure(key)
+                logger.warning("Failed login for %r from %s", body.username, key)
+                if locked:
+                    raise HTTPException(status_code=429, detail=f"Too many failed attempts; try again in {int(locked)}s",
+                                        headers={"Retry-After": str(int(locked))}) from exc
+            raise _user_error(exc) from exc
+        throttle.record_success(key)
+        _account_of(user)
+        _issue_session(response, request, user)
+        logger.info("User %r logged in from %s", user.username, key)
+        return {"authenticated": True, "username": user.username, "user": user.public()}
+
+    @app.post("/api/auth/logout")
+    def auth_logout(request: Request, response: Response) -> dict[str, Any]:
+        sessions.revoke(request.cookies.get(SESSION_COOKIE))
+        response.delete_cookie(SESSION_COOKIE, path=_cookie_path())
+        return {"authenticated": False}
+
+    @app.post("/api/auth/password")
+    def auth_change_password(body: PasswordChangeBody, request: Request, response: Response,
+                             user: User = Depends(require_auth)) -> dict[str, Any]:
+        if user.id == 0:
+            raise HTTPException(status_code=403, detail="Not available for API-token access")
+        try:
+            updated = users.change_password(user, body.current_password, body.new_password)
+        except UserError as exc:
+            raise _user_error(exc) from exc
+        _issue_session(response, request, updated)  # tokens are bound to the password hash: all others are now invalid
+        return {"ok": True, "username": updated.username, "user": updated.public()}
+
+    @app.get("/api/auth/me", dependencies=auth)
+    def auth_me(user: User = Depends(require_auth)) -> dict[str, Any]:
+        return user.public()
+
+    @app.patch("/api/auth/profile")
+    def auth_profile(body: ProfileBody, user: User = Depends(require_auth)) -> dict[str, Any]:
+        if user.id == 0:
+            raise HTTPException(status_code=403, detail="Not available for API-token access")
+        try:
+            updated = users.update_profile(user, email=body.email, auto_trade=body.auto_trade)
+        except UserError as exc:
+            raise _user_error(exc) from exc
+        engine.accounts.ensure(updated.username, enabled=updated.auto_trade)
+        return updated.public()
+
+    @app.get("/api/users", dependencies=auth)
+    def list_users(user: User = Depends(require_auth)) -> list[dict[str, Any]]:
+        if not user.is_admin:
+            raise HTTPException(status_code=403, detail="Administrators only")
+        return [u.public() for u in users.list()]
 
     # ----------------------------------------------------------- status
     @app.get("/api/status", dependencies=auth)
@@ -536,7 +740,42 @@ def create_app(engine: TradingEngine, config_path: str | None = None, token: str
     # -------------------------------------------------------- watchlist
     @app.get("/api/watchlist", dependencies=auth)
     def get_watchlist() -> list[dict[str, Any]]:
-        return watchlist_payload(engine)
+        return watchlist_payload(engine, symbols)
+
+    @app.get("/api/symbols/search", dependencies=auth)
+    def search_symbols(q: str = Query(default="", max_length=40), limit: int = Query(default=8, ge=1, le=25),
+                       remote: bool = Query(default=False)) -> dict[str, Any]:
+        """Ticker suggestions with company names.
+
+        Local directory matches are free and instant.  ``remote=true`` additionally asks the
+        data provider (spending one request of its budget) - the UI offers that explicitly.
+        """
+        query = q.strip()
+        local = [e.to_dict() for e in symbols.search(query, limit)]
+        remote_results: list[dict[str, Any]] = []
+        remote_error: str | None = None
+        provider = engine.data.provider
+        supports_remote = provider.name in ("alphavantage", "twelvedata")
+        if remote and query and supports_remote:
+            if not engine.data.limiter.try_acquire():
+                remote_error = "API request budget exhausted"
+            else:
+                try:
+                    seen = {row["symbol"] for row in local}
+                    remote_results = [{"symbol": info.symbol, "name": info.name, "type": info.type or "stock",
+                                       "source": provider.name, "region": info.region}
+                                      for info in provider.search(query)[:limit] if info.symbol not in seen]
+                except ProviderError as exc:
+                    remote_error = str(exc)
+        return {"query": query, "results": local + remote_results, "remote_supported": supports_remote,
+                "remote_error": remote_error, "provider": provider.name}
+
+    @app.get("/api/symbols/{symbol}", dependencies=auth)
+    def lookup_symbol(symbol: str) -> dict[str, Any]:
+        entry = symbols.get(symbol)
+        if entry is None:
+            raise HTTPException(status_code=404, detail=f"Unknown symbol {symbol.upper()}")
+        return entry.to_dict()
 
     @app.post("/api/watchlist", dependencies=auth, status_code=201)
     def add_symbol(body: SymbolBody) -> dict[str, Any]:
@@ -696,18 +935,52 @@ def create_app(engine: TradingEngine, config_path: str | None = None, token: str
         df = None if result is None else result.bars
         return {"symbol": symbol, "buy": marker_indices(df, buys), "sell": marker_indices(df, sells)}
 
-    @app.get("/api/positions", dependencies=auth)
-    def get_positions() -> dict[str, Any]:
-        return positions_payload(engine)
+    @app.get("/api/positions")
+    def get_positions(user: User = Depends(require_auth)) -> dict[str, Any]:
+        return positions_payload(engine, user.username, _account_of(user))
 
-    @app.post("/api/account/reset", dependencies=auth)
-    def reset_account() -> dict[str, Any]:
-        broker = engine.broker
+    @app.post("/api/account/reset")
+    def reset_account(user: User = Depends(require_auth)) -> dict[str, Any]:
+        broker = _account_of(user)
         if not isinstance(broker, PaperBroker):
             raise HTTPException(status_code=409, detail="Only the paper account can be reset")
         broker.initial_cash = config.trading.initial_cash
         broker.reset()
-        return positions_payload(engine)
+        return positions_payload(engine, user.username, broker)
+
+    # ------------------------------------------------------ history / analytics
+    @app.get("/api/history")
+    def get_history(user: User = Depends(require_auth), limit: int = Query(default=500, ge=1, le=5000)) -> dict[str, Any]:
+        """Fills, closed trades, cumulative P&L and statistics of the signed-in user's account."""
+        broker = _account_of(user)
+        fills = engine.storage.fills_for_account(user.username)
+        report = build_report(user.username, fills, len(broker.positions()))
+        data = report.to_dict()
+        data["fills"] = list(reversed(fills))[:limit]
+        data["account_summary"] = positions_payload(engine, user.username, broker)["account"]
+        return data
+
+    @app.get("/api/analytics")
+    def get_analytics(user: User = Depends(require_auth)) -> dict[str, Any]:
+        broker = _account_of(user)
+        report = build_report(user.username, engine.storage.fills_for_account(user.username), len(broker.positions()))
+        data = report.to_dict(include_trades=False)
+        data["ai_available"] = ai.configured
+        data["ai_model"] = config.ai.model if ai.configured else None
+        data["open_positions"] = len(broker.positions())
+        return data
+
+    @app.post("/api/analytics/ai")
+    def ai_analysis(user: User = Depends(require_auth)) -> dict[str, Any]:
+        if not ai.configured:
+            raise HTTPException(status_code=409, detail="No AI provider configured (Settings -> AI insights)")
+        broker = _account_of(user)
+        report = build_report(user.username, engine.storage.fills_for_account(user.username), len(broker.positions()))
+        try:
+            result = ai.analyze(report.ai_context())
+        except RuntimeError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return {**result, "generated_at": datetime.now(UTC).isoformat()}
 
     @app.get("/api/events", dependencies=auth)
     def recent_events(limit: int = Query(default=50, ge=1, le=200)) -> list[dict[str, Any]]:
@@ -723,6 +996,15 @@ def create_app(engine: TradingEngine, config_path: str | None = None, token: str
         data["web"]["token"] = ""
         data["web"]["password_hash"] = ""
         data["web"]["secret_key"] = ""
+        data["ai"]["api_key_set"] = bool(config.ai.api_key)
+        data["ai"]["api_key"] = ""
+        data["payments"]["stripe"]["secret_key_set"] = bool(config.payments.stripe.secret_key)
+        data["payments"]["stripe"]["webhook_secret_set"] = bool(config.payments.stripe.webhook_secret)
+        data["payments"]["stripe"]["secret_key"] = ""
+        data["payments"]["stripe"]["webhook_secret"] = ""
+        data["payments"]["configured"] = wallet.enabled
+        data["fx"]["available"] = ctx.fx is not None
+        data["email_configured"] = mailer.configured
         data["options"] = {"providers": list(PROVIDER_BUDGETS), "intervals": list(VALID_INTERVALS),
                            "budgets": {k: {"per_minute": v[0], "per_day": v[1]} for k, v in PROVIDER_BUDGETS.items()}}
         data["config_path"] = config_path
@@ -733,11 +1015,23 @@ def create_app(engine: TradingEngine, config_path: str | None = None, token: str
         raw = config.to_dict()
         if body.scan_interval is not None:
             raw["scan_interval"] = body.scan_interval
-        for section in ("data", "market_hours", "notifications", "trading"):
+        for section in ("data", "market_hours", "notifications", "trading", "ai", "web", "execution", "payments", "fx"):
             patch = getattr(body, section)
             if patch:
-                if section == "data" and not patch.get("api_key"):
+                if section in ("data", "ai") and not patch.get("api_key"):
                     patch.pop("api_key", None)  # blank = keep the stored key
+                if section == "payments" and isinstance(patch.get("stripe"), dict):
+                    for secret_field in ("secret_key", "webhook_secret"):
+                        if not patch["stripe"].get(secret_field):
+                            patch["stripe"].pop(secret_field, None)
+                    patch["stripe"].pop("secret_key_set", None)
+                    patch["stripe"].pop("webhook_secret_set", None)
+                if section == "payments":
+                    patch.pop("configured", None)
+                if section == "fx":
+                    patch.pop("available", None)
+                if section == "web":
+                    patch = {k: v for k, v in patch.items() if k in ("allow_signup", "email_verification", "public_url")}
                 if section == "notifications" and "email" in patch and not patch["email"].get("password"):
                     patch["email"].pop("password", None)
                 _deep_update(raw[section], patch)
@@ -755,6 +1049,29 @@ def create_app(engine: TradingEngine, config_path: str | None = None, token: str
         config.market_hours = updated.market_hours
         config.notifications = updated.notifications
         config.trading = updated.trading
+        config.ai = updated.ai
+        ai.cfg = config.ai
+        config.execution = updated.execution
+        engine.execution.cfg = config.execution
+        fx_changed = updated.fx != config.fx
+        payments_changed = updated.payments != config.payments
+        config.fx = updated.fx
+        config.payments = updated.payments
+        wallet.cfg = config.payments
+        if fx_changed:
+            if ctx.fx is not None:
+                ctx.fx.close()
+            ctx.fx = _build_fx()
+            wallet.fx = ctx.fx
+        if payments_changed:
+            if ctx.payments is not None:
+                ctx.payments.close()
+            ctx.payments = _build_payments()
+            wallet.provider = ctx.payments
+        config.web.allow_signup = updated.web.allow_signup
+        config.web.email_verification = updated.web.email_verification
+        config.web.public_url = updated.web.public_url
+        mailer.cfg = config.notifications.email
         _save_config()
         _sync_webhook(engine)
         if data_changed:
@@ -776,7 +1093,7 @@ def create_app(engine: TradingEngine, config_path: str | None = None, token: str
     # --------------------------------------------------------- websocket
     @app.websocket("/ws")
     async def websocket_events(websocket: WebSocket, token: str | None = Query(default=None)) -> None:
-        user = sessions.verify(websocket.cookies.get(SESSION_COOKIE), config.web.password_hash)
+        user = _user_from_cookie(websocket.cookies.get(SESSION_COOKIE))
         if user is None and not _token_ok(token):
             await websocket.close(code=4401)
             return
@@ -793,19 +1110,30 @@ def create_app(engine: TradingEngine, config_path: str | None = None, token: str
             broadcaster.unsubscribe(queue)
 
     # ------------------------------------------------------------ static
-    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+    app.mount("/static", NoCacheStaticFiles(directory=STATIC_DIR), name="static")
+
+    def _page(name: str) -> FileResponse:
+        return FileResponse(STATIC_DIR / name, headers={"Cache-Control": "no-store"})
 
     @app.get("/", include_in_schema=False)
     def index(request: Request) -> Response:
         if _authenticated(request) is None:
             return RedirectResponse("login", status_code=302)  # relative: works behind any base path
-        return FileResponse(STATIC_DIR / "index.html")
+        return _page("index.html")
 
     @app.get("/login", include_in_schema=False)
     def login_page(request: Request) -> Response:
         if _authenticated(request) is not None:
             return RedirectResponse("./", status_code=302)
-        return FileResponse(STATIC_DIR / "login.html")
+        return _page("login.html")
+
+    @app.get("/signup", include_in_schema=False)
+    def signup_page(request: Request) -> Response:
+        if _authenticated(request) is not None:
+            return RedirectResponse("./", status_code=302)
+        if _setup_required() or not config.web.allow_signup:
+            return RedirectResponse("login", status_code=302)
+        return _page("signup.html")
 
     @app.get("/api/health", include_in_schema=False)
     def health() -> JSONResponse:
@@ -819,6 +1147,15 @@ def create_app(engine: TradingEngine, config_path: str | None = None, token: str
         return JSONResponse({"ok": ok, "websocket_clients": broadcaster.client_count}, status_code=200 if ok else 503)
 
     return app
+
+
+class NoCacheStaticFiles(StaticFiles):
+    """Static files that browsers must revalidate (ETag/Last-Modified) so updates are picked up."""
+
+    async def get_response(self, path: str, scope: Any) -> Response:
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
 
 
 def _deep_update(target: dict[str, Any], patch: dict[str, Any]) -> None:
@@ -866,10 +1203,10 @@ def serve(engine: TradingEngine, config_path: str | None = None, host: str | Non
     if on_started:
         on_started(url)
     logger.info("Web UI available at %s", url)
-    if not cfg.password_hash:
-        logger.warning("No login password configured yet - open %s to create the administrator account", url)
-    if host not in ("127.0.0.1", "localhost", "::1") and not cfg.password_hash:
-        logger.warning("The web UI is exposed on %s without a password!", host)
+    if engine.storage.count_users() == 0:
+        logger.warning("No administrator account yet - open %s to create it", url)
+        if host not in ("127.0.0.1", "localhost", "::1"):
+            logger.warning("The web UI is exposed on %s without a password!", host)
     server.run()
     return 0
 

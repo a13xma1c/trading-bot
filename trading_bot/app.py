@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .broker import PaperBroker
+from .broker import AccountManager, PaperBroker
 from .config import AppConfig
 from .data import MarketDataProvider, MarketDataService, RateLimiter, create_provider
 from .engine import TradingEngine
@@ -74,7 +74,10 @@ def build_engine(config: AppConfig, notifier: Notifier | None = None,
     store = StrategyStore(config.strategies_path, plugin_dir=config.plugins_path)
     store.load()
 
+    # The administrator's account keeps the historical state file name; other users get accounts/<name>.json.
     broker = PaperBroker(config.trading.initial_cash, state_file=data_dir / "paper_broker.json")
+    accounts = AccountManager(config.trading.initial_cash, data_dir=data_dir, default_name=config.web.username)
     storage = Storage(data_dir / "history.sqlite3")
     notifier = notifier or build_notifier(config.notifications)
-    return TradingEngine(config, service, store, notifier, broker, storage, data_factory=build_data_service)
+    return TradingEngine(config, service, store, notifier, broker, storage, data_factory=build_data_service,
+                         accounts=accounts)
