@@ -394,7 +394,12 @@ def test_scan_signals_positions_and_events(web: tuple[TestClient, TradingEngine,
 
     signals = client.get("/api/signals").json()
     assert {s["symbol"] for s in signals} == {"AAPL", "MSFT"}
-    assert all(s["action"] == "BUY" and s["executed"] for s in signals if s["strategy"] == "Always Buy")
+    assert all(s["action"] == "BUY" for s in signals)
+    # Exactly one BUY per symbol is executed (the first strategy that fired on the bar opens the position; a second
+    # strategy signalling the same symbol on the same bar is notified but must not add to the position).
+    executed = [s for s in signals if s["executed"]]
+    assert sorted(s["symbol"] for s in executed) == ["AAPL", "MSFT"]
+    assert any(s["strategy"] == "Always Buy" for s in signals)
     assert "headline" in signals[0] and "description" in signals[0]
     markers = client.get("/api/signals/markers/AAPL").json()
     assert markers["buy"] == [199]

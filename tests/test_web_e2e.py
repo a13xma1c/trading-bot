@@ -193,10 +193,16 @@ def test_start_engine_shows_signal_notification(page: Page, server: LiveServer) 
     page.wait_for_function("[...document.querySelectorAll('#signalsTable tbody tr')].some(r => r.innerText.includes('Always Buy'))")
     row = page.locator("#signalsTable tbody tr", has_text="Always Buy").first
     expect(row.locator(".pill")).to_have_text("BUY")
-    expect(row.locator("td").nth(5)).to_have_text("yes")  # executed by the paper broker
+    # Every watchlist symbol gets exactly one executed BUY: the first strategy that fires on a bar opens the
+    # position (usually Always Buy; MA Crossover may beat it on some bars), later BUYs on the same symbol do not add.
+    page.wait_for_function("[...document.querySelectorAll('#signalsTable tbody tr')].filter(r => r.children[5].innerText === 'yes').length >= 2", timeout=15000)
+    executed = page.locator("#signalsTable tbody tr").filter(has=page.locator("td:nth-child(6)", has_text="yes"))
+    expect(executed).to_have_count(2)
+    symbols = {executed.nth(i).locator("td").nth(1).inner_text() for i in range(2)}
+    assert symbols == {"AAPL", "MSFT"}
     snackbar = page.locator("#snackbar")
     expect(snackbar).to_have_class(re.compile(r"open"))
-    expect(snackbar).to_contain_text("Executed: BUY")
+    expect(snackbar).to_contain_text("BUY")
     expect(page.locator("#signalsCount")).to_contain_text("recent")
 
     page.click("#navPositions")

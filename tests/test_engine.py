@@ -624,3 +624,16 @@ def test_order_service_simulate_place_close_cancel(tmp_path: Path) -> None:
     with pytest.raises(OrderError) as unknown:
         service.snapshot("BAD")  # the provider rejects this symbol
     assert unknown.value.status == 409 and "no such symbol" in str(unknown.value)
+
+
+def test_two_strategies_same_bar_open_one_position(tmp_path: Path) -> None:
+    """Two strategies signalling the same symbol on one bar: both are notified, only the first executes."""
+    defs = [always_buy("first"), always_buy("second")]
+    engine, received, events, clock = make_engine(tmp_path, defs, watchlist=("AAPL",), trading=True)
+    signals = engine.scan_once()
+    assert [s.strategy for s in signals] == ["first", "second"] and len(received) == 2
+    pos = engine.broker.position("AAPL")
+    assert pos is not None and pos.strategy == "first"
+    executed = {row["strategy"]: bool(row["executed"]) for row in engine.storage.recent_signals()}
+    assert executed == {"first": True, "second": False}
+    assert len(engine.storage.recent_fills()) == 1
