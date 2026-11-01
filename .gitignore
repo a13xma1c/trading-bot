@@ -1,39 +1,29 @@
 # Python
 __pycache__/
 *.py[cod]
-*$py.class
 *.so
-.Python
-env/
 build/
-develop-eggs/
 dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
 *.egg-info/
-.installed.cfg
-*.egg
+.eggs/
 
-# Logs
-*.log
-logs/
-
-# Config with API keys
-# Uncomment below line if you don't want to commit your API key
-# config.json
-
-# Virtual Environment
+# Environments
+.venv/
 venv/
 ENV/
+env/
 
-# IDE specific files
+# Runtime state (sqlite history, paper broker, rate-limit counters, logs)
+bot_data/
+*.log
+*.sqlite3
+
+# Tooling
+.pytest_cache/
+.ruff_cache/
 .idea/
 .vscode/
 *.swp
-*.swo
+reports/*
+!reports/.gitkeep
+deploy/data/

@@ -1,0 +1,58 @@
+# CI: build the image, start the bot on demo data and run the containerized load / scalability
+# test against it.  The run fails (non-zero exit) when a threshold is violated.
+#
+#   docker compose -f docker-compose.ci.yml up --build --abort-on-container-exit --exit-code-from loadtest
+
+services:
+  bot:
+    build:
+      context: .
+      target: runtime
+    image: trading-bot:ci
+    environment:
+      TRADING_BOT_WEB_PASSWORD: ci-load-test-password
+      TRADING_BOT__WEB__SECRET_KEY: ci-only-secret-key
+      TRADING_BOT__DATA__PROVIDER: demo
+      TRADING_BOT__SCAN_INTERVAL: "5"
+      TRADING_BOT__MARKET_HOURS__ENABLED: "false"
+      TRADING_BOT__TRADING__TRADING_ENABLED: "true"
+      TRADING_BOT__WATCHLIST: AAPL,MSFT,TSLA
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/api/ready', timeout=4).status == 200 else 1)"]
+      interval: 5s
+      timeout: 5s
+      start_period: 10s
+      retries: 12
+
+  loadtest:
+    image: trading-bot:ci
+    depends_on:
+      bot:
+        condition: service_healthy
+    entrypoint: ["python", "-m", "trading_bot.tools.loadtest"]
+    command:
+      - --url=http://bot:8080
+      - --username=admin
+      - --password=ci-load-test-password
+      - --ws-clients=${LOADTEST_WS_CLIENTS:-300}
+      - --users=${LOADTEST_USERS:-30}
+      - --duration=${LOADTEST_DURATION:-30}
+      - --max-p95-ms=${LOADTEST_MAX_P95_MS:-750}
+      - --max-fanout-ms=${LOADTEST_MAX_FANOUT_MS:-2000}
+      - --min-rps=${LOADTEST_MIN_RPS:-100}
+      - --report=/reports/loadtest.json
+    # The image runs as UID 1000; make sure ./reports is writable for it (the CI workflow does
+    # `chmod -R a+rwX reports`) or override the user here, e.g. `user: "${UID:-1000}:${GID:-1000}"`.
+    volumes:
+      - ./reports:/reports
+
+  # Unit / API / scalability tests inside the image's test stage (no browser).
+  unit-tests:
+    build:
+      context: .
+      target: test
+    image: trading-bot:test
+    profiles: ["tests"]
+    command: ["pytest", "-q", "--ignore=tests/test_web_e2e.py", "--junitxml=/reports/junit-container.xml"]
+    volumes:
+      - ./reports:/reports

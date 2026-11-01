@@ -1,0 +1,28 @@
+{
+  "watchlist": [
+    "AAPL",
+    "MSFT",
+    "TSLA"
+  ],
+  "scan_interval": 15,
+  "data": {
+    "provider": "demo",
+    "interval": "5min",
+    "bars": 300
+  },
+  "trading": {
+    "trading_enabled": true
+  },
+  "market_hours": {
+    "enabled": false
+  },
+  "web": {
+    "host": "127.0.0.1",
+    "port": 8080,
+    "username": "admin",
+    "password_hash": "",
+    "token": "",
+    "session_hours": 12,
+    "open_browser": true
+  }
+}
