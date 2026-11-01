@@ -1,0 +1,62 @@
+# Production-style deployment: one (or more) bot shards behind an nginx reverse proxy.
+#
+#   TRADING_BOT_WEB_PASSWORD=change-me docker compose up -d
+#   open http://localhost/
+#
+# Persistent state (config.json with the hashed login, signal history, paper broker, rate-limit
+# counters, session secret) lives in the named volume of each shard.
+
+services:
+  bot:
+    build:
+      context: .
+      target: runtime
+    image: trading-bot:latest
+    restart: unless-stopped
+    environment:
+      TRADING_BOT_WEB_PASSWORD: ${TRADING_BOT_WEB_PASSWORD:-}       # leave empty to use the first-run setup page
+      TRADING_BOT_API_KEY: ${TRADING_BOT_API_KEY:-}
+      TRADING_BOT__DATA__PROVIDER: ${TRADING_BOT_PROVIDER:-demo}
+      TRADING_BOT__WATCHLIST: ${TRADING_BOT_WATCHLIST:-AAPL,MSFT,GOOGL,AMZN,NVDA}
+    volumes:
+      - bot-data:/data
+    expose:
+      - "8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/api/health', timeout=4).status == 200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  # A second, independent shard (own watchlist / API key / strategies) - uncomment and add the
+  # matching location block in deploy/nginx.conf.
+  # bot-b:
+  #   image: trading-bot:latest
+  #   restart: unless-stopped
+  #   environment:
+  #     TRADING_BOT_WEB_PASSWORD: ${TRADING_BOT_WEB_PASSWORD:-}
+  #     TRADING_BOT__WEB__BASE_PATH: /bots/b
+  #     TRADING_BOT__DATA__PROVIDER: demo
+  #     TRADING_BOT__WATCHLIST: TSLA,AMD,INTC
+  #   volumes:
+  #     - bot-b-data:/data
+
+  proxy:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      bot:
+        condition: service_healthy
+    ports:
+      - "${TRADING_BOT_HTTP_PORT:-80}:80"
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/nginx.conf:ro
+
+volumes:
+  bot-data:
+  # bot-b-data:

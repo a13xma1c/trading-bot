@@ -68,7 +68,7 @@ function applyStatus(status) {
 $("bannerSettingsButton").addEventListener("click", () => { showView("settings"); $("settingsApiKey").focus(); });
 $("bannerUseDemoButton").addEventListener("click", async () => {
   try {
-    const result = await api.post("/api/settings/provider", { provider: "demo" });
+    const result = await api.post("api/settings/provider", { provider: "demo" });
     applyStatus(result.status);
     showSnackbar("Using demo market data", { duration: 4000 });
     await loadWatchlist();
@@ -79,12 +79,12 @@ $("bannerUseDemoButton").addEventListener("click", async () => {
 });
 
 async function refreshStatus() {
-  applyStatus(await api.get("/api/status"));
+  applyStatus(await api.get("api/status"));
 }
 
 $("startButton").addEventListener("click", async () => {
   try {
-    const status = state.status?.running ? await api.post("/api/engine/stop") : await api.post("/api/engine/start");
+    const status = state.status?.running ? await api.post("api/engine/stop") : await api.post("api/engine/start");
     applyStatus(status);
   } catch (err) {
     showSnackbar(err.message, { kind: "error" });
@@ -93,7 +93,7 @@ $("startButton").addEventListener("click", async () => {
 
 $("scanNowButton").addEventListener("click", async () => {
   try {
-    await api.post("/api/engine/scan");
+    await api.post("api/engine/scan");
     showSnackbar("Refreshing all symbols…", { duration: 2500 });
   } catch (err) {
     showSnackbar(err.message, { kind: "error" });
@@ -130,7 +130,7 @@ function renderWatchlist() {
 }
 
 async function loadWatchlist() {
-  state.watchlist = await api.get("/api/watchlist");
+  state.watchlist = await api.get("api/watchlist");
   if (!state.selected || !state.watchlist.some((r) => r.symbol === state.selected)) {
     state.selected = state.watchlist[0]?.symbol || null;
     if (state.selected) await loadBars(state.selected);
@@ -144,7 +144,7 @@ $("watchlistForm").addEventListener("submit", async (e) => {
   const symbol = input.value.trim().toUpperCase();
   if (!symbol) return;
   try {
-    const result = await api.post("/api/watchlist", { symbol });
+    const result = await api.post("api/watchlist", { symbol });
     input.value = "";
     if (!result.added) { showSnackbar(`${symbol} is already in the watchlist`, { duration: 3000 }); return; }
     await loadWatchlist();
@@ -156,7 +156,7 @@ $("watchlistForm").addEventListener("submit", async (e) => {
 
 async function removeSymbol(symbol) {
   try {
-    await api.delete(`/api/watchlist/${encodeURIComponent(symbol)}`);
+    await api.delete(`api/watchlist/${encodeURIComponent(symbol)}`);
     if (state.selected === symbol) state.selected = null;
     await loadWatchlist();
   } catch (err) {
@@ -177,7 +177,7 @@ async function selectSymbol(symbol) {
 async function loadBars(symbol) {
   $("chartTitle").textContent = symbol;
   try {
-    const data = await api.get(`/api/bars/${encodeURIComponent(symbol)}`);
+    const data = await api.get(`api/bars/${encodeURIComponent(symbol)}`);
     if (state.selected !== symbol) return;
     chart.setData(symbol, data.bars);
     const row = state.watchlist.find((r) => r.symbol === symbol);
@@ -216,7 +216,7 @@ async function applyOverlay() {
     return;
   }
   try {
-    const overlay = await api.get(`/api/bars/${encodeURIComponent(state.selected)}/overlay/${encodeURIComponent(name)}`);
+    const overlay = await api.get(`api/bars/${encodeURIComponent(state.selected)}/overlay/${encodeURIComponent(name)}`);
     chart.setMarkers({ buy: [], sell: [] });
     chart.setOverlay(overlay);
   } catch (err) {
@@ -227,7 +227,7 @@ async function applyOverlay() {
 async function applySignalMarkers() {
   if (!state.selected) return;
   try {
-    const markers = await api.get(`/api/signals/markers/${encodeURIComponent(state.selected)}`);
+    const markers = await api.get(`api/signals/markers/${encodeURIComponent(state.selected)}`);
     chart.setMarkers(markers);
   } catch { /* markers are optional */ }
 }
@@ -238,7 +238,7 @@ $("refreshButton").addEventListener("click", async () => {
   if (!state.selected) return;
   try {
     $("chartStatusLabel").textContent = "refreshing…";
-    await api.post(`/api/bars/${encodeURIComponent(state.selected)}/refresh`);
+    await api.post(`api/bars/${encodeURIComponent(state.selected)}/refresh`);
   } catch (err) {
     showSnackbar(err.message, { kind: "error" });
   }
@@ -271,7 +271,7 @@ function signalRow(signal) {
 }
 
 async function loadSignals() {
-  const rows = await api.get("/api/signals?limit=200");
+  const rows = await api.get("api/signals?limit=200");
   const tbody = $("signalsTable").querySelector("tbody");
   tbody.replaceChildren(...rows.map(signalRow));
   state.signalsCount = rows.length;
@@ -315,7 +315,7 @@ function renderStrategyList() {
 }
 
 async function loadStrategies() {
-  state.strategies = await api.get("/api/strategies");
+  state.strategies = await api.get("api/strategies");
   renderStrategyList();
   renderOverlayOptions();
   renderBacktestSymbols();
@@ -324,7 +324,7 @@ async function loadStrategies() {
 
 async function setEnabled(name, enabled) {
   try {
-    await api.patch(`/api/strategies/${encodeURIComponent(name)}`, { enabled });
+    await api.patch(`api/strategies/${encodeURIComponent(name)}`, { enabled });
     const s = state.strategies.find((x) => x.name === name);
     if (s) s.enabled = enabled;
     if (state.editing === name) $("strategyEnabledSwitch").checked = enabled;
@@ -408,7 +408,7 @@ async function validateStrategy() {
   let body;
   try { body = readEditor(); } catch (err) { setEditorStatus(err.message, "error"); return null; }
   try {
-    const result = await api.post("/api/strategies/validate", { ...body, symbol: state.selected });
+    const result = await api.post("api/strategies/validate", { ...body, symbol: state.selected });
     if (!result.valid) { setEditorStatus(result.problems.join("\n"), "error"); return null; }
     setEditorStatus(result.bars ? `Valid. On ${result.bars} bars of ${result.symbol}: ${result.buy} buy and ${result.sell} sell signals.`
                                  : "Valid (no market data loaded yet to test against).", "ok");
@@ -426,7 +426,7 @@ $("strategyForm").addEventListener("submit", async (e) => {
   let body;
   try { body = readEditor(); } catch (err) { setEditorStatus(err.message, "error"); return; }
   try {
-    await api.post("/api/strategies", { ...body, previous_name: state.editing });
+    await api.post("api/strategies", { ...body, previous_name: state.editing });
     state.editing = body.name;
     await loadStrategies();
     loadIntoEditor(body.name);
@@ -463,7 +463,7 @@ $("deleteStrategyButton").addEventListener("click", async () => {
   if (!name) return;
   if (!(await confirmDialog("Delete strategy", `Delete '${name}'? This cannot be undone.`, { okLabel: "Delete", danger: true }))) return;
   try {
-    await api.delete(`/api/strategies/${encodeURIComponent(name)}`);
+    await api.delete(`api/strategies/${encodeURIComponent(name)}`);
     state.editing = null;
     await loadStrategies();
     fillEditor({ name: "", buy_rule: "", params: {}, enabled: true });
@@ -490,7 +490,7 @@ $("showOnChartButton").addEventListener("click", async () => {
 });
 
 async function loadRulesHelp() {
-  const help = await api.get("/api/strategies/help");
+  const help = await api.get("api/strategies/help");
   const box = $("rulesHelp");
   box.replaceChildren(
     el("p", { html: "Rules are boolean expressions over the bar series <b>open, high, low, close, volume</b> and the functions below. Parameters defined in the table can be used by name." }),
@@ -529,7 +529,7 @@ $("backtestRunButton").addEventListener("click", async () => {
   const symbol = $("backtestSymbolSelect").value;
   $("backtestStatus").textContent = "Running…";
   try {
-    const result = await api.post("/api/backtest", { symbol, definition: body, cash: Number($("backtestCashInput").value || 10000),
+    const result = await api.post("api/backtest", { symbol, definition: body, cash: Number($("backtestCashInput").value || 10000),
                                                      commission: Number($("backtestCommissionInput").value || 0) });
     state.lastBacktest = { symbol, ...result };
     renderBacktest(result);
@@ -573,7 +573,7 @@ $("backtestShowButton").addEventListener("click", async () => {
 // =========================================================================
 
 async function loadPositions() {
-  const data = await api.get("/api/positions");
+  const data = await api.get("api/positions");
   const a = data.account;
   $("accountSummary").replaceChildren(
     el("dt", { text: "Cash" }), el("dd", { id: "accountCash", text: fmt(a.cash) }),
@@ -601,7 +601,7 @@ async function loadPositions() {
 $("resetPaperAccountButton").addEventListener("click", async () => {
   if (!(await confirmDialog("Reset paper account", "Close all paper positions and restore the initial cash?", { okLabel: "Reset", danger: true }))) return;
   try {
-    await api.post("/api/account/reset");
+    await api.post("api/account/reset");
     await loadPositions();
     showSnackbar("Paper account reset", { duration: 3000 });
   } catch (err) {
@@ -614,7 +614,7 @@ $("resetPaperAccountButton").addEventListener("click", async () => {
 // =========================================================================
 
 async function loadSettings() {
-  const s = await api.get("/api/settings");
+  const s = await api.get("api/settings");
   state.settings = s;
   const provider = $("settingsProvider");
   provider.replaceChildren(...s.options.providers.map((p) => el("option", { value: p, text: p })));
@@ -669,7 +669,7 @@ $("settingsForm").addEventListener("submit", async (e) => {
   };
   const status = $("settingsStatus");
   try {
-    const result = await api.put("/api/settings", body);
+    const result = await api.put("api/settings", body);
     applyStatus(result.status);
     await loadSettings();
     status.className = "body-medium success-text";
@@ -744,8 +744,8 @@ function onEvent(message) {
 // =========================================================================
 
 async function loadUser() {
-  const auth = await api.get("/api/auth/status");
-  if (!auth.authenticated) { location.replace("/login"); return false; }
+  const auth = await api.get("api/auth/status");
+  if (!auth.authenticated) { location.replace("login"); return false; }
   state.user = auth.username;
   $("userName").textContent = auth.username;
   $("userAvatar").textContent = (auth.username || "?").slice(0, 1).toUpperCase();
@@ -753,7 +753,7 @@ async function loadUser() {
 }
 
 $("logoutButton").addEventListener("click", async () => {
-  try { await api.post("/api/auth/logout"); } finally { location.replace("/login"); }
+  try { await api.post("api/auth/logout"); } finally { location.replace("login"); }
 });
 
 $("accountSaveButton").addEventListener("click", async () => {
@@ -763,7 +763,7 @@ $("accountSaveButton").addEventListener("click", async () => {
     status.className = "body-medium error-text"; status.textContent = "Passwords do not match"; return;
   }
   try {
-    const result = await api.post("/api/auth/password", { username: $("accountUsername").value.trim() || null,
+    const result = await api.post("api/auth/password", { username: $("accountUsername").value.trim() || null,
       current_password: $("accountCurrentPassword").value, new_password: newPassword });
     state.user = result.username;
     $("userName").textContent = result.username;

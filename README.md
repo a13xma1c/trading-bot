@@ -259,6 +259,80 @@ strategies and can be enabled/disabled there.
 A signal is identified by *(strategy, symbol, action, bar time)*; the same
 signal is never notified twice, even across restarts.
 
+## Deployment & scaling
+
+### Container
+
+```bash
+docker build -t trading-bot .
+docker run -d -p 8080:8080 -v trading-bot-data:/data \
+  -e TRADING_BOT_WEB_PASSWORD=change-me -e TRADING_BOT__DATA__PROVIDER=demo trading-bot
+```
+
+The image is multi-stage (dependencies installed from the lock file with uv,
+slim runtime, non-root user, `HEALTHCHECK` on `/api/health`). All state lives in
+`/data` (config with the hashed login, signal history, paper broker, rate-limit
+counters, session secret), so the container is disposable. Every setting can be
+supplied through the environment: `TRADING_BOT__<SECTION>__<FIELD>`
+(`TRADING_BOT__WEB__HOST`, `TRADING_BOT__WATCHLIST=AAPL,MSFT`,
+`TRADING_BOT__MARKET_HOURS__ENABLED=false`, …) plus the secrets
+`TRADING_BOT_API_KEY`, `TRADING_BOT_WEB_PASSWORD`, `TRADING_BOT_WEB_TOKEN`.
+
+`docker compose up -d` starts a bot shard behind an **nginx** reverse proxy
+(`deploy/nginx.conf`: TLS-ready, gzip, WebSocket upgrade, rate limiting of the
+login endpoint and the API).
+
+### How it scales
+
+The unit of scale is a **shard**: one engine with its own watchlist, API key
+(and therefore its own provider budget), strategies, paper account and history.
+Within a shard:
+
+* the API is stateless — sessions are HMAC-signed cookies (`web.secret_key`,
+  generated into `/data` if unset), so restarts and rolling updates keep users
+  signed in and no session store is needed;
+* serialized bar payloads are memoized per fetch, responses are gzip-compressed
+  and handlers run in a thread pool (`web.worker_threads`);
+* WebSocket fan-out uses bounded per-client queues: one slow browser cannot
+  build up memory or stall the others (dropped events are counted in the log);
+* `/api/health` (liveness) and `/api/ready` (readiness, incl. the number of
+  WebSocket clients) serve orchestrators.
+
+To scale **out**, run more shards behind the proxy, each under its own base
+path (`TRADING_BOT__WEB__BASE_PATH=/bots/b`, see the commented `bot-b` service
+in `docker-compose.yml` and the matching `location` in `deploy/nginx.conf`).
+Sharding by watchlist is also what the data providers' per-key budgets call
+for. Running several replicas of the *same* shard is not supported: the engine
+owns the scan loop, the paper broker and the SQLite history.
+
+### Scalability testing
+
+`python -m trading_bot.tools.loadtest` simulates many browser sessions against
+a running server — N long-lived WebSocket subscribers, M concurrent HTTP users
+cycling through the dashboard endpoints, and a forced scan whose event must
+reach every subscriber — and reports throughput, latency percentiles and
+fan-out latency. Thresholds make it a pass/fail gate:
+
+```bash
+python -m trading_bot.tools.loadtest --url http://localhost:8080 --password ... \
+  --ws-clients 300 --users 30 --duration 30 --max-p95-ms 750 --max-fanout-ms 2000 --min-rps 100
+```
+
+`docker-compose.ci.yml` runs exactly that against the freshly built image
+(`docker compose -f docker-compose.ci.yml up --abort-on-container-exit --exit-code-from loadtest`);
+a smaller version is part of the regular test suite (`tests/test_scalability.py`).
+
+### CI
+
+`.github/workflows/ci.yml` runs on every push / pull request:
+
+| Job | What |
+| --- | --- |
+| `quality` | ruff, mypy |
+| `tests` | the full pytest suite inside the official Playwright container (browser tests included) |
+| `container` | builds the runtime and test images, smoke-tests the image (starts with no config, health/ready, login page, anonymous API refused, unprivileged user), runs the unit/API/scalability tests inside the container and the containerized load test with thresholds; reports are uploaded as artifacts |
+| `publish` | pushes the image to GHCR on `main` and version tags |
+
 ## Configuration reference (`config.json`)
 
 ```jsonc
@@ -273,7 +347,10 @@ signal is never notified twice, even across restarts.
     "host": "127.0.0.1", "port": 8080, "open_browser": true,
     "username": "admin", "password_hash": "",   // set via the setup page or `trading-bot set-password`
     "token": "",                   // optional bearer token for scripts (or TRADING_BOT_WEB_TOKEN)
-    "session_hours": 12
+    "secret_key": "",              // signs session cookies; generated into data_dir when empty
+    "session_hours": 12,
+    "base_path": "",               // e.g. "/bots/a" when served under a prefix by a reverse proxy
+    "worker_threads": 64
   },
   "data": {
     "provider": "alphavantage",    // alphavantage | twelvedata | csv | demo
@@ -329,6 +406,7 @@ trading_bot/
   storage.py         SQLite signal & fill history
   backtest.py        event-driven backtester
   app.py             composition root; __main__.py CLI
+  tools/loadtest.py  load / scalability test (also used by CI in a container)
   web/
     server.py        FastAPI app: REST API, WebSocket broadcaster, static files
     charting.py      chart payloads (bars, overlays grouped into panes, markers)
@@ -357,6 +435,7 @@ uv run mypy tests trading_bot # type check (tests are fully annotated and checke
 | --- | --- | --- |
 | Unit | `tests/test_indicators.py`, `test_expression.py`, `test_strategy.py`, `test_backtest.py`, `test_broker_storage.py`, `test_notify_config.py`, `test_data_service.py`, `test_providers.py` | Pure logic; providers use recorded API payloads and a fake HTTP session |
 | Integration | `tests/test_engine.py`, `tests/test_cli.py` | Scan loop, pacing, market hours, paper trading, CLI commands incl. `serve` |
+| Scalability | `tests/test_scalability.py` | Load-test tool run in-process: 60 WebSocket subscribers + 8 HTTP users, fan-out and latency thresholds |
 | API | `tests/test_web_api.py`, `tests/test_web_auth.py` | Every REST endpoint, login/session/setup/throttling, bearer token and the WebSocket (FastAPI `TestClient`, no browser) |
 | End-to-end | `tests/test_web_e2e.py` | Playwright + headless Chromium against a live server: login and first-run setup pages, layout/MD tokens, chart pixels, zoom/pan, watchlist, engine & notifications, editor, backtest dialog, settings, credential change, error states |
 

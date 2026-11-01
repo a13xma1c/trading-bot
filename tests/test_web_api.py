@@ -133,7 +133,7 @@ def test_login_required_and_session_flow(tmp_path: Path) -> None:
         with TestClient(create_app(engine, str(config_path))) as client:
             # Anonymous: the app redirects to the login page and the API refuses.
             assert client.get("/", follow_redirects=False).status_code == 302
-            assert client.get("/", follow_redirects=False).headers["location"] == "/login"
+            assert client.get("/", follow_redirects=False).headers["location"] == "login"  # relative: base-path safe
             login_page = client.get("/login")
             assert login_page.status_code == 200 and 'id="loginForm"' in login_page.text
             assert client.get("/api/status").status_code == 401
@@ -412,3 +412,54 @@ def test_settings_roundtrip(web: tuple[TestClient, TradingEngine, Path]) -> None
     bad = client.put("/api/settings", json={"market_hours": {"timezone": "Mars/Olympus"}})
     assert bad.status_code == 422 and "time zone" in bad.json()["detail"]
     assert client.put("/api/settings", json={"scan_interval": 0}).status_code == 422
+
+
+# ----------------------------------------------------------- deployment
+
+
+def test_base_path_cookie_and_relative_redirects(tmp_path: Path) -> None:
+    """Behind a reverse proxy under /bots/a the app must use relative URLs and a scoped cookie."""
+    config_path = make_config(tmp_path, web={"base_path": "/bots/a"})
+    engine = build_engine(AppConfig.load(config_path))
+    try:
+        with TestClient(create_app(engine, str(config_path)), root_path="/bots/a") as client:
+            assert client.get("/", follow_redirects=False).headers["location"] == "login"
+            page = client.get("/login")
+            assert 'href="static/css/material.css"' in page.text  # relative assets
+            login = client.post("/api/auth/login", json={"username": TEST_USER, "password": TEST_PASSWORD})
+            assert "Path=/bots/a/" in login.headers["set-cookie"]  # scoped to the shard's prefix
+            cookie = {"Cookie": f"tb_session={login.cookies['tb_session']}"}  # the browser sends it under /bots/a/
+            assert client.get("/api/status", headers=cookie).status_code == 200
+            assert client.get("/login", headers=cookie, follow_redirects=False).headers["location"] == "./"
+            assert client.get("/api/openapi.json").json()["servers"][0]["url"] == "/bots/a"
+    finally:
+        engine.close()
+
+
+def test_health_and_readiness(web: tuple[TestClient, TradingEngine, Path]) -> None:
+    client, _, _ = web
+    health = client.get("/api/health").json()
+    assert health["ok"] is True and "version" in health
+    ready = client.get("/api/ready")
+    assert ready.status_code == 200 and ready.json()["ok"] is True and ready.json()["websocket_clients"] == 0
+    with client.websocket_connect("/ws") as ws:
+        ws.receive_json()
+        assert client.get("/api/ready").json()["websocket_clients"] == 1
+
+
+def test_sessions_survive_restart_and_gzip(tmp_path: Path) -> None:
+    """Stateless signed sessions: a cookie issued by one process is valid for another with the same secret."""
+    config_path = make_config(tmp_path, web={"secret_key": "shared-secret"})
+    engine = build_engine(AppConfig.load(config_path))
+    try:
+        with TestClient(create_app(engine, str(config_path))) as first:
+            sign_in(first)
+            cookie = first.cookies["tb_session"]
+            response = first.get("/api/bars/AAPL", headers={"Accept-Encoding": "gzip"})
+            assert response.headers.get("content-encoding") == "gzip"  # large JSON is compressed
+            assert len(response.json()["bars"]) == 200
+        with TestClient(create_app(engine, str(config_path))) as second:  # "another replica / after restart"
+            second.cookies.set("tb_session", cookie)
+            assert second.get("/api/status").status_code == 200
+    finally:
+        engine.close()

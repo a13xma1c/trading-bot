@@ -7,8 +7,8 @@ export const api = {
     const response = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), credentials: "same-origin" });
     let data = null;
     try { data = await response.json(); } catch { data = null; }
-    if (response.status === 401 && !path.startsWith("/api/auth/")) {
-      location.replace("/login");  // session expired or signed out elsewhere
+    if (response.status === 401 && !path.startsWith("api/auth/")) {
+      location.replace("login");  // session expired or signed out elsewhere
       throw new Error("Authentication required");
     }
     if (!response.ok) {
@@ -39,13 +39,12 @@ export function connectEvents(onMessage, onState) {
   let closed = false;
   let delay = 1000;
   const open = () => {
-    const proto = location.protocol === "https:" ? "wss" : "ws";
-    socket = new WebSocket(`${proto}://${location.host}/ws`);  // authenticated by the session cookie
+    socket = new WebSocket(new URL("ws", location.href).href.replace(/^http/, "ws"));  // relative: works behind a base path; cookie-authenticated
     socket.onopen = () => { delay = 1000; onState?.(true); };
     socket.onmessage = (event) => { try { onMessage(JSON.parse(event.data)); } catch (err) { console.error(err); } };
     socket.onclose = (event) => {
       onState?.(false);
-      if (event.code === 4401) { location.replace("/login"); return; }
+      if (event.code === 4401) { location.replace("login"); return; }
       if (!closed) setTimeout(open, delay = Math.min(delay * 2, 15000));
     };
     socket.onerror = () => socket.close();

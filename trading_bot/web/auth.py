@@ -1,8 +1,8 @@
 """Authentication primitives: password hashing, sessions and login throttling.
 
 Passwords are stored as ``pbkdf2_sha256$<iterations>$<salt>$<hash>`` (standard
-library only).  Sessions live in memory and are identified by a random token
-carried in an HttpOnly cookie; they expire after ``web.session_hours``.
+library only).  Sessions are stateless HMAC-signed tokens carried in an
+HttpOnly cookie; they expire after ``web.session_hours``.
 """
 
 from __future__ import annotations
@@ -10,10 +10,12 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import os
 import secrets
 import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 
 PBKDF2_ITERATIONS = 600_000
 _ALGORITHM = "pbkdf2_sha256"
@@ -56,65 +58,85 @@ def validate_password_strength(password: str) -> str | None:
     return None
 
 
-@dataclass
-class Session:
-    token: str
-    username: str
-    created_at: float
-    expires_at: float
-    last_seen: float = 0.0
+class SessionSigner:
+    """Stateless, HMAC-signed session tokens (no server-side session storage needed).
 
+    A token carries the username, an expiry and a fingerprint of the password
+    hash, so changing the password invalidates every session, and any instance
+    that knows the secret can verify tokens (restarts and replicas keep users
+    signed in).  Explicit logouts are remembered per process until they expire.
+    """
 
-class SessionStore:
-    """Thread-safe in-memory session store."""
-
-    def __init__(self, lifetime_seconds: float = 12 * 3600, clock=time.time) -> None:
+    def __init__(self, secret: str | bytes, lifetime_seconds: float = 12 * 3600, clock=time.time) -> None:
+        if not secret:
+            raise ValueError("session secret must not be empty")
+        self._secret = secret.encode("utf-8") if isinstance(secret, str) else secret
         self.lifetime = lifetime_seconds
         self._clock = clock
-        self._sessions: dict[str, Session] = {}
+        self._revoked: dict[str, float] = {}
         self._lock = threading.Lock()
 
-    def create(self, username: str) -> Session:
-        now = self._clock()
-        session = Session(secrets.token_urlsafe(32), username, now, now + self.lifetime, now)
-        with self._lock:
-            self._prune(now)
-            self._sessions[session.token] = session
-        return session
+    @staticmethod
+    def fingerprint(password_hash: str) -> str:
+        return hashlib.sha256(password_hash.encode("utf-8")).hexdigest()[:16]
 
-    def get(self, token: str | None) -> Session | None:
-        if not token:
+    def issue(self, username: str, password_hash: str) -> str:
+        expires = int(self._clock() + self.lifetime)
+        payload = f"{username}|{expires}|{self.fingerprint(password_hash)}|{secrets.token_hex(8)}"
+        body = _b64(payload.encode("utf-8"))
+        return f"{body}.{self._sign(body)}"
+
+    def verify(self, token: str | None, password_hash: str) -> str | None:
+        """Return the username for a valid token, or None."""
+        if not token or "." not in token:
+            return None
+        body, signature = token.rsplit(".", 1)
+        if not hmac.compare_digest(self._sign(body), signature):
+            return None
+        try:
+            username, expires, fingerprint, _nonce = _unb64(body).decode("utf-8").split("|")
+        except (ValueError, UnicodeDecodeError):
             return None
         now = self._clock()
+        if int(expires) <= now or fingerprint != self.fingerprint(password_hash):
+            return None
         with self._lock:
-            session = self._sessions.get(token)
-            if session is None:
+            for key in [k for k, until in self._revoked.items() if until <= now]:
+                del self._revoked[key]
+            if token in self._revoked:
                 return None
-            if session.expires_at <= now:
-                del self._sessions[token]
-                return None
-            session.last_seen = now
-            return session
+        return username
 
     def revoke(self, token: str | None) -> None:
-        if not token:
+        if not token or "." not in token:
+            return
+        body = token.rsplit(".", 1)[0]
+        try:
+            expires = int(_unb64(body).decode("utf-8").split("|")[1])
+        except (ValueError, UnicodeDecodeError, IndexError):
             return
         with self._lock:
-            self._sessions.pop(token, None)
+            self._revoked[token] = float(expires)
 
-    def revoke_all(self, username: str | None = None) -> None:
-        with self._lock:
-            for key in [k for k, s in self._sessions.items() if username is None or s.username == username]:
-                del self._sessions[key]
+    def _sign(self, body: str) -> str:
+        return hmac.new(self._secret, body.encode("ascii"), hashlib.sha256).hexdigest()
 
-    def count(self) -> int:
-        with self._lock:
-            self._prune(self._clock())
-            return len(self._sessions)
 
-    def _prune(self, now: float) -> None:
-        for key in [k for k, s in self._sessions.items() if s.expires_at <= now]:
-            del self._sessions[key]
+def load_or_create_secret(path: os.PathLike[str] | str) -> str:
+    """Read the session secret from ``path``, creating a random one (mode 0600) if missing."""
+    file = Path(path)
+    if file.exists():
+        secret = file.read_text(encoding="utf-8").strip()
+        if secret:
+            return secret
+    file.parent.mkdir(parents=True, exist_ok=True)
+    secret = secrets.token_urlsafe(48)
+    file.write_text(secret, encoding="utf-8")
+    try:
+        os.chmod(file, 0o600)
+    except OSError:  # pragma: no cover - e.g. unsupported filesystems
+        pass
+    return secret
 
 
 @dataclass

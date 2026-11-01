@@ -9,6 +9,7 @@ have to be committed to version control:
 * ``TRADING_BOT_SMTP_PASSWORD`` - overrides ``notifications.email.password``
 * ``TRADING_BOT_WEB_TOKEN`` - overrides ``web.token`` (API token for scripted access)
 * ``TRADING_BOT_WEB_PASSWORD`` - plain-text login password (hashed in memory; handy for containers)
+* ``TRADING_BOT__<SECTION>__<FIELD>`` - any other setting, e.g. ``TRADING_BOT__DATA__PROVIDER=demo``
 
 The loader also understands the legacy flat layout used by the first version of
 this project (``api_key``, ``scan_interval``, ``rsi_period`` ...) and migrates
@@ -137,7 +138,10 @@ class WebConfig:
     username: str = "admin"
     password_hash: str = ""   # set with `trading-bot set-password` (or TRADING_BOT_WEB_PASSWORD)
     token: str = ""           # optional API token (or TRADING_BOT_WEB_TOKEN)
+    secret_key: str = ""      # signs session cookies; generated and persisted in data_dir when empty
     session_hours: float = 12.0
+    base_path: str = ""       # external URL prefix when served behind a reverse proxy, e.g. "/bots/a"
+    worker_threads: int = 64  # thread pool used for (blocking) API handlers
     open_browser: bool = True
 
 
@@ -192,6 +196,8 @@ class AppConfig:
             logger.warning("Config file %s not found, using defaults", path)
             cfg = cls()
             cfg.apply_env()
+            cfg.validate()
+            cfg.base_dir = path.parent  # relative paths live next to the config file once it is created
             return cfg
         try:
             with path.open("r", encoding="utf-8") as fh:
@@ -245,6 +251,17 @@ class AppConfig:
 
     # ------------------------------------------------------------ helpers
     def apply_env(self) -> None:
+        """Apply environment overrides.
+
+        Besides the dedicated secret variables, any setting can be overridden with
+        ``TRADING_BOT__<SECTION>__<FIELD>`` (double underscores), e.g.
+        ``TRADING_BOT__DATA__PROVIDER=demo``, ``TRADING_BOT__WEB__HOST=0.0.0.0`` or
+        ``TRADING_BOT__WATCHLIST=AAPL,MSFT``.  Values are converted to the field's
+        type (bool/int/float/list).
+        """
+        for name, value in sorted(os.environ.items()):
+            if name.startswith("TRADING_BOT__"):
+                self._apply_override(name[len("TRADING_BOT__"):].lower().split("__"), value, name)
         if key := os.environ.get("TRADING_BOT_API_KEY"):
             self.data.api_key = key
         if url := os.environ.get("TRADING_BOT_WEBHOOK_URL"):
@@ -257,6 +274,19 @@ class AppConfig:
             from .web.auth import hash_password
 
             self.web.password_hash = hash_password(password)
+        self.watchlist = [s.strip().upper() for s in self.watchlist if s.strip()]
+
+    def _apply_override(self, path: list[str], value: str, name: str) -> None:
+        target: Any = self
+        for part in path[:-1]:
+            target = getattr(target, part, None)
+            if target is None or not hasattr(target, "__dataclass_fields__"):
+                raise ConfigError(f"{name}: unknown configuration section {'.'.join(path[:-1])!r}")
+        field_name = path[-1]
+        field_info = next((f for f in fields(target) if f.name == field_name), None)
+        if field_info is None:
+            raise ConfigError(f"{name}: unknown setting {'.'.join(path)!r}")
+        setattr(target, field_name, _coerce(value, field_info.type, name))
 
     def validate(self) -> None:
         if self.scan_interval < 1:
@@ -282,12 +312,38 @@ class AppConfig:
             raise ConfigError("web.username must not be empty")
         if self.web.session_hours <= 0:
             raise ConfigError("web.session_hours must be positive")
+        if self.web.base_path and (not self.web.base_path.startswith("/") or self.web.base_path.endswith("/")):
+            raise ConfigError("web.base_path must start with '/' and not end with '/' (e.g. /bots/a)")
+        if self.web.worker_threads < 1:
+            raise ConfigError("web.worker_threads must be >= 1")
         for sym in self.watchlist:
             if not sym.replace(".", "").replace("-", "").isalnum():
                 raise ConfigError(f"Invalid symbol in watchlist: {sym!r}")
 
     def requires_api_key(self) -> bool:
         return self.data.provider in ("alphavantage", "twelvedata")
+
+
+def _coerce(value: str, type_hint: Any, name: str) -> Any:
+    """Convert an environment string to the type of a dataclass field."""
+    hint = str(type_hint)
+    if "bool" in hint:
+        lowered = value.strip().lower()
+        if lowered in ("1", "true", "yes", "on"):
+            return True
+        if lowered in ("0", "false", "no", "off", ""):
+            return False
+        raise ConfigError(f"{name}: expected a boolean, got {value!r}")
+    if "list" in hint:
+        return [item.strip() for item in value.split(",") if item.strip()]
+    try:
+        if hint.startswith("int") or hint == "int | None":
+            return None if value.strip() == "" else int(value)
+        if hint.startswith("float"):
+            return float(value)
+    except ValueError as exc:
+        raise ConfigError(f"{name}: expected a number, got {value!r}") from exc
+    return value
 
 
 def _build(cls, raw: dict[str, Any]):

@@ -24,3 +24,6 @@ bot_data/
 .idea/
 .vscode/
 *.swp
+reports/*
+!reports/.gitkeep
+deploy/data/

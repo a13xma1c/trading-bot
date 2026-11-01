@@ -7,6 +7,7 @@ import threading
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any
 
 import pandas as pd
 
@@ -30,6 +31,7 @@ class BarsResult:
     fetched_at: float
     stale: bool = False      # served from cache because of the request budget
     error: str | None = None # last error, if data could not be refreshed
+    payload: Any = None      # memoized serialized form (the bars never change after creation)
 
     @property
     def age_seconds(self) -> float:

@@ -43,9 +43,9 @@ function setMode(setup) {
 
 async function init() {
   try {
-    const response = await fetch("/api/auth/status", { headers: { Accept: "application/json" } });
+    const response = await fetch("api/auth/status", { headers: { Accept: "application/json" } });
     const status = await response.json();
-    if (status.authenticated) { location.replace("/"); return; }
+    if (status.authenticated) { location.replace("./"); return; }
     providers = status.providers || [];
     const select = $("providerSelect");
     select.replaceChildren(...providers.map((p) => { const o = document.createElement("option"); o.value = p.name; o.textContent = p.name; return o; }));
@@ -75,8 +75,8 @@ $("loginForm").addEventListener("submit", async (event) => {
       const key = $("apiKeyInput").value.trim();
       if (key) body.api_key = key;
     }
-    await request(setupMode ? "/api/auth/setup" : "/api/auth/login", body);
-    location.replace("/");
+    await request(setupMode ? "api/auth/setup" : "api/auth/login", body);
+    location.replace("./");
   } catch (err) {
     showError(err.message);
     $("passwordInput").focus();

@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -45,7 +46,14 @@ from ..engine import (
 )
 from ..notify import WebhookChannel
 from ..strategy import RuleStrategy, Signal, Strategy, StrategyDefinition, function_help
-from .auth import LoginThrottle, SessionStore, hash_password, validate_password_strength, verify_password
+from .auth import (
+    LoginThrottle,
+    SessionSigner,
+    hash_password,
+    load_or_create_secret,
+    validate_password_strength,
+    verify_password,
+)
 from .charting import bars_payload, marker_indices, overlay_payload
 
 logger = logging.getLogger(__name__)
@@ -67,6 +75,16 @@ class Broadcaster:
         self._queues: set[asyncio.Queue[dict[str, Any]]] = set()
         self._lock = threading.Lock()
         self.history: list[dict[str, Any]] = []
+        self.dropped = 0  # messages dropped for slow clients (bounded queues keep memory flat)
+
+    @property
+    def is_started(self) -> bool:
+        return self._loop is not None
+
+    @property
+    def client_count(self) -> int:
+        with self._lock:
+            return len(self._queues)
 
     def start(self, loop: asyncio.AbstractEventLoop) -> None:
         self._loop = loop
@@ -104,7 +122,9 @@ class Broadcaster:
             try:
                 queue.put_nowait(message)
             except asyncio.QueueFull:
-                logger.warning("Dropping event for a slow WebSocket client")
+                self.dropped += 1
+                if self.dropped in (1, 100, 1000) or self.dropped % 10_000 == 0:
+                    logger.warning("Dropped %d events for slow WebSocket clients", self.dropped)
 
 
 def serialize_signal(signal: Signal, executed: bool | None = None) -> dict[str, Any]:
@@ -311,23 +331,30 @@ class SettingsBody(BaseModel):
 
 
 def create_app(engine: TradingEngine, config_path: str | None = None, token: str | None = None,
-               sessions: SessionStore | None = None, throttle: LoginThrottle | None = None) -> FastAPI:
+               sessions: SessionSigner | None = None, throttle: LoginThrottle | None = None) -> FastAPI:
     config: AppConfig = engine.config
     api_token = token if token is not None else config.web.token
     broadcaster = Broadcaster(engine)
-    sessions = sessions or SessionStore(config.web.session_hours * 3600)
+    secret = config.web.secret_key or load_or_create_secret(config.data_dir_path / "session.secret")
+    sessions = sessions or SessionSigner(secret, config.web.session_hours * 3600)
     throttle = throttle or LoginThrottle()
+    base_path = config.web.base_path
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        import anyio
+
+        anyio.to_thread.current_default_thread_limiter().total_tokens = config.web.worker_threads
         broadcaster.start(asyncio.get_running_loop())
         try:
             yield
         finally:
             broadcaster.stop()
+            engine.stop()  # graceful shutdown: finish the current scan, then stop the loop
 
     app = FastAPI(title="Trading Bot", version=__version__, lifespan=lifespan, docs_url="/api/docs",
                   openapi_url="/api/openapi.json", redoc_url=None)
+    app.add_middleware(GZipMiddleware, minimum_size=1024)
     app.state.engine = engine
     app.state.broadcaster = broadcaster
     app.state.sessions = sessions
@@ -345,9 +372,9 @@ def create_app(engine: TradingEngine, config_path: str | None = None, token: str
 
     def _authenticated(request: Request) -> str | None:
         """Username of the caller, or None.  Accepts a session cookie or the API bearer token."""
-        session = sessions.get(request.cookies.get(SESSION_COOKIE))
-        if session is not None:
-            return session.username
+        username = sessions.verify(request.cookies.get(SESSION_COOKIE), config.web.password_hash)
+        if username is not None:
+            return username
         if _token_ok(_bearer(request)):
             return "api-token"
         return None
@@ -361,9 +388,18 @@ def create_app(engine: TradingEngine, config_path: str | None = None, token: str
     def _client_key(request: Request) -> str:
         return request.client.host if request.client else "unknown"
 
+    def _cookie_path() -> str:
+        return (base_path or "") + "/"
+
     def _set_session_cookie(response: Response, request: Request, token: str) -> None:
+        secure = request.url.scheme == "https" or request.headers.get("x-forwarded-proto", "") == "https"
         response.set_cookie(SESSION_COOKIE, token, max_age=int(config.web.session_hours * 3600), httponly=True,
-                            samesite="lax", secure=request.url.scheme == "https", path="/")
+                            samesite="lax", secure=secure, path=_cookie_path())
+
+    def _issue_session(response: Response, request: Request) -> str:
+        token = sessions.issue(config.web.username, config.web.password_hash)
+        _set_session_cookie(response, request, token)
+        return token
 
     auth: list[Any] = [Depends(require_auth)]
 
@@ -401,10 +437,9 @@ def create_app(engine: TradingEngine, config_path: str | None = None, token: str
         _save_config()
         if data_changed:
             _apply_data_settings()
-        session = sessions.create(config.web.username)
-        _set_session_cookie(response, request, session.token)
+        _issue_session(response, request)
         logger.info("Administrator account %r created (provider %s)", config.web.username, config.data.provider)
-        return {"authenticated": True, "username": session.username, "status": status_payload(engine)}
+        return {"authenticated": True, "username": config.web.username, "status": status_payload(engine)}
 
     @app.post("/api/auth/login")
     def auth_login(body: LoginBody, request: Request, response: Response) -> dict[str, Any]:
@@ -425,15 +460,14 @@ def create_app(engine: TradingEngine, config_path: str | None = None, token: str
                                     headers={"Retry-After": str(int(locked))})
             raise HTTPException(status_code=401, detail="Invalid username or password")
         throttle.record_success(key)
-        session = sessions.create(config.web.username)
-        _set_session_cookie(response, request, session.token)
-        logger.info("User %r logged in from %s", session.username, key)
-        return {"authenticated": True, "username": session.username}
+        _issue_session(response, request)
+        logger.info("User %r logged in from %s", config.web.username, key)
+        return {"authenticated": True, "username": config.web.username}
 
     @app.post("/api/auth/logout")
     def auth_logout(request: Request, response: Response) -> dict[str, Any]:
         sessions.revoke(request.cookies.get(SESSION_COOKIE))
-        response.delete_cookie(SESSION_COOKIE, path="/")
+        response.delete_cookie(SESSION_COOKIE, path=_cookie_path())
         return {"authenticated": False}
 
     @app.post("/api/auth/password", dependencies=auth)
@@ -447,9 +481,7 @@ def create_app(engine: TradingEngine, config_path: str | None = None, token: str
             config.web.username = body.username.strip()
         config.web.password_hash = hash_password(body.new_password)
         _save_config()
-        sessions.revoke_all()  # every other session must log in again
-        session = sessions.create(config.web.username)
-        _set_session_cookie(response, request, session.token)
+        _issue_session(response, request)  # tokens are bound to the password hash: all others are now invalid
         return {"ok": True, "username": config.web.username}
 
     def _bars_for(symbol: str) -> Any:
@@ -536,7 +568,9 @@ def create_app(engine: TradingEngine, config_path: str | None = None, token: str
                 raise HTTPException(status_code=503, detail=str(exc)) from exc
         if result is None:
             raise HTTPException(status_code=503, detail=engine.last_error(symbol) or f"No data for {symbol}")
-        return {"symbol": symbol, "interval": config.data.interval, "bars": bars_payload(result.bars),
+        if result.payload is None:
+            result.payload = bars_payload(result.bars)  # computed once per fetched frame, shared by all clients
+        return {"symbol": symbol, "interval": config.data.interval, "bars": result.payload,
                 "fetched_at": result.fetched_at, "stale": result.stale, "error": engine.last_error(symbol)}
 
     @app.post("/api/bars/{symbol}/refresh", dependencies=auth)
@@ -688,6 +722,7 @@ def create_app(engine: TradingEngine, config_path: str | None = None, token: str
         data["notifications"]["email"]["password"] = ""
         data["web"]["token"] = ""
         data["web"]["password_hash"] = ""
+        data["web"]["secret_key"] = ""
         data["options"] = {"providers": list(PROVIDER_BUDGETS), "intervals": list(VALID_INTERVALS),
                            "budgets": {k: {"per_minute": v[0], "per_day": v[1]} for k, v in PROVIDER_BUDGETS.items()}}
         data["config_path"] = config_path
@@ -741,8 +776,8 @@ def create_app(engine: TradingEngine, config_path: str | None = None, token: str
     # --------------------------------------------------------- websocket
     @app.websocket("/ws")
     async def websocket_events(websocket: WebSocket, token: str | None = Query(default=None)) -> None:
-        session = sessions.get(websocket.cookies.get(SESSION_COOKIE))
-        if session is None and not _token_ok(token):
+        user = sessions.verify(websocket.cookies.get(SESSION_COOKIE), config.web.password_hash)
+        if user is None and not _token_ok(token):
             await websocket.close(code=4401)
             return
         await websocket.accept()
@@ -763,18 +798,25 @@ def create_app(engine: TradingEngine, config_path: str | None = None, token: str
     @app.get("/", include_in_schema=False)
     def index(request: Request) -> Response:
         if _authenticated(request) is None:
-            return RedirectResponse("/login", status_code=302)
+            return RedirectResponse("login", status_code=302)  # relative: works behind any base path
         return FileResponse(STATIC_DIR / "index.html")
 
     @app.get("/login", include_in_schema=False)
     def login_page(request: Request) -> Response:
         if _authenticated(request) is not None:
-            return RedirectResponse("/", status_code=302)
+            return RedirectResponse("./", status_code=302)
         return FileResponse(STATIC_DIR / "login.html")
 
     @app.get("/api/health", include_in_schema=False)
     def health() -> JSONResponse:
-        return JSONResponse({"ok": True, "running": engine.running})
+        """Liveness: the process serves requests."""
+        return JSONResponse({"ok": True, "running": engine.running, "version": __version__})
+
+    @app.get("/api/ready", include_in_schema=False)
+    def ready() -> JSONResponse:
+        """Readiness: event fan-out is wired up and the strategy store is loaded."""
+        ok = broadcaster.is_started and bool(engine.strategies.all_strategies() or True)
+        return JSONResponse({"ok": ok, "websocket_clients": broadcaster.client_count}, status_code=200 if ok else 503)
 
     return app
 
@@ -804,7 +846,8 @@ def create_server(engine: TradingEngine, config_path: str | None = None, host: s
 
     cfg = engine.config.web
     app = create_app(engine, config_path)
-    return uvicorn.Server(uvicorn.Config(app, host=host or cfg.host, port=port or cfg.port, log_level=log_level))
+    return uvicorn.Server(uvicorn.Config(app, host=host or cfg.host, port=port or cfg.port, log_level=log_level,
+                                         proxy_headers=True, forwarded_allow_ips="*", root_path=cfg.base_path))
 
 
 def serve(engine: TradingEngine, config_path: str | None = None, host: str | None = None, port: int | None = None,

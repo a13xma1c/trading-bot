@@ -5,61 +5,22 @@
     "TSLA"
   ],
   "scan_interval": 15,
-  "data_dir": "bot_data",
-  "strategies_file": "strategies.json",
-  "plugins_dir": "strategies",
-  "log_level": "INFO",
   "data": {
     "provider": "demo",
-    "api_key": "",
     "interval": "5min",
-    "bars": 300,
-    "requests_per_minute": null,
-    "requests_per_day": null,
-    "cache_ttl_seconds": 60,
-    "csv_directory": "data",
-    "closed_bars_only": false
-  },
-  "market_hours": {
-    "enabled": false,
-    "timezone": "America/New_York",
-    "open": "09:30",
-    "close": "16:00",
-    "weekdays": [
-      0,
-      1,
-      2,
-      3,
-      4
-    ]
-  },
-  "notifications": {
-    "desktop": true,
-    "sound": true,
-    "webhook_url": "",
-    "email": {
-      "enabled": false,
-      "host": "",
-      "port": 587,
-      "username": "",
-      "password": "",
-      "sender": "",
-      "recipients": [],
-      "use_tls": true
-    }
+    "bars": 300
   },
   "trading": {
-    "trading_enabled": true,
-    "paper": true,
-    "initial_cash": 100000.0,
-    "position_size_pct": 0.1,
-    "max_positions": 5
+    "trading_enabled": true
+  },
+  "market_hours": {
+    "enabled": false
   },
   "web": {
     "host": "127.0.0.1",
     "port": 8080,
     "username": "admin",
-    "password_hash": "pbkdf2_sha256$600000$eYoJtWXvAS1JTCm9IhKlQQ$DMrdL6TH1L78KZf62j9dBUB9PkkF0diFbYFAcS1TeNg",
+    "password_hash": "",
     "token": "",
     "session_hours": 12,
     "open_browser": true

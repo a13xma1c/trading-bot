@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import signal
 import sys
 import threading
@@ -22,7 +23,8 @@ from .config import AppConfig, ConfigError
 
 def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="trading_bot", description="Real-time trading signal bot")
-    p.add_argument("--config", "-c", default="config.json", help="path to config.json")
+    p.add_argument("--config", "-c", default=os.environ.get("TRADING_BOT_CONFIG", "config.json"),
+                   help="path to config.json (default: $TRADING_BOT_CONFIG or ./config.json)")
     p.add_argument("--version", action="version", version=f"trading-bot {__version__}")
     sub = p.add_subparsers(dest="command")
     serve = sub.add_parser("serve", help="start the web application (default)")
