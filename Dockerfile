@@ -21,7 +21,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --no-install-project --no-editable
 COPY trading_bot ./trading_bot
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --no-editable
+    uv sync --frozen --no-dev --no-editable \
+    # fail the build early if the web UI assets did not make it into the installed package
+    && /opt/venv/bin/python -c "import trading_bot.web.server as s; assert (s.STATIC_DIR / 'index.html').is_file(), s.STATIC_DIR"
 
 # --------------------------------------------------------------------- test
 # Dev tooling for CI (unit/API/scalability tests without a browser).

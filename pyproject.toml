@@ -1,6 +1,6 @@
 [project]
 name = "trading-bot"
-version = "1.0.0"
+version = "2.0.0"
 description = "Real-time trading signal bot with a Material Design web UI, custom rule-based strategies, backtesting and notifications"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -35,6 +35,10 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["trading_bot*"]
+
+[tool.setuptools.package-data]
+# The web UI (HTML/CSS/JS) must ship inside the wheel; Python files alone are not enough.
+"trading_bot.web" = ["static/*.html", "static/css/*.css", "static/js/*.js"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -89,8 +89,9 @@ jobs:
         run: |
           docker run -d --name smoke -p 18080:8080 -e TRADING_BOT__DATA__PROVIDER=demo trading-bot:ci
           for i in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:18080/api/health; then ok=1; break; fi; sleep 1
+            if curl -fsS http://127.0.0.1:18080/api/health 2>/dev/null; then ok=1; break; fi; sleep 1
           done
+          echo
           [ "${ok:-}" = 1 ] || { docker logs smoke; exit 1; }
           curl -fsS http://127.0.0.1:18080/api/ready
           curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:18080/login | grep -q 200
