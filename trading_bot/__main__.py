@@ -41,8 +41,9 @@ def _parser() -> argparse.ArgumentParser:
     bt.add_argument("--bars", type=int, help="number of bars (default: config)")
     bt.add_argument("--cash", type=float, default=10_000.0)
     sub.add_parser("check", help="validate configuration and strategies")
-    pw = sub.add_parser("set-password", help="set the web UI login (stored as a PBKDF2 hash in the config file)")
-    pw.add_argument("--username", help="login name (default: keep the configured one)")
+    pw = sub.add_parser("set-password", help="set or reset the administrator password of the web UI "
+                        "(stored hashed in the config file and applied when the server starts)")
+    pw.add_argument("--username", help="administrator login name (default: keep the configured one)")
     pw.add_argument("--password", help="password (prompted securely when omitted; or TRADING_BOT_WEB_PASSWORD)")
     return p
 
@@ -101,7 +102,7 @@ def _set_password(config: AppConfig, args: argparse.Namespace) -> int:
         config.web.username = args.username.strip()
     config.web.password_hash = hash_password(password)
     config.save(args.config)
-    print(f"Login for user {config.web.username!r} saved to {args.config}")
+    print(f"Password for administrator {config.web.username!r} saved to {args.config}; it is applied when the server starts")
     return 0
 
 

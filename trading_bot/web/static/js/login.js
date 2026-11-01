@@ -1,7 +1,10 @@
 /** Login / first-run setup page. */
 
+import { attachPasswordFeedback, enhancePasswordFields } from "./passwords.js";
+
 const $ = (id) => document.getElementById(id);
 let setupMode = false;
+let feedback = null;
 
 async function request(path, body) {
   const response = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" },
@@ -15,6 +18,22 @@ async function request(path, body) {
 function showError(text) {
   $("loginError").textContent = text;
 }
+
+function showNotice(text, error = false) {
+  const notice = $("loginNotice");
+  notice.textContent = text;
+  notice.className = `notice ${error ? "error" : "success"}`;
+}
+
+$("resendButton").addEventListener("click", async () => {
+  try {
+    const result = await request("api/auth/resend-verification", { identifier: $("usernameInput").value.trim() });
+    showNotice(result.message);
+    showError("");
+  } catch (err) {
+    showError(err.message);
+  }
+});
 
 let providers = [];
 
@@ -31,12 +50,20 @@ function updateProviderNote() {
 function setMode(setup) {
   setupMode = setup;
   $("confirmField").classList.toggle("hidden", !setup);
+  $("passwordFeedback").classList.toggle("hidden", !setup);
   $("setupDataFields").classList.toggle("hidden", !setup);
+  $("emailField").classList.toggle("hidden", !setup);
+  $("usernameLabel").textContent = setup ? "Username" : "Username or e-mail";
+  $("usernameInput").autocomplete = setup ? "username" : "username email";
+  if (setup && !feedback) {
+    feedback = attachPasswordFeedback({ input: $("passwordInput"), usernameInput: $("usernameInput"),
+                                        container: $("passwordFeedback"), confirmInput: $("confirmInput") });
+  }
   $("confirmInput").required = setup;
   $("loginSubtitle").textContent = setup ? "Create the administrator account" : "Sign in to continue";
   $("loginButtonLabel").textContent = setup ? "Create account" : "Sign in";
   $("loginHint").textContent = setup
-    ? "No password has been configured yet. The account you create here is stored (hashed) in config.json; you can change it later under Settings or with `trading-bot set-password`."
+    ? "No administrator account exists yet. The account you create here is stored (password hashed) in the bot's database; change the password later under Settings or reset it with `trading-bot set-password`."
     : "";
   $("passwordInput").autocomplete = setup ? "new-password" : "current-password";
 }
@@ -53,8 +80,12 @@ async function init() {
     select.addEventListener("change", updateProviderNote);
     updateProviderNote();
     setMode(!!status.setup_required);
-    if (status.configured_username && !status.setup_required) $("usernameInput").value = status.configured_username;
-    if (status.setup_required) $("usernameInput").value = status.configured_username || "admin";
+    $("signupLink").classList.toggle("hidden", !status.allow_signup);
+    if (status.setup_required) $("usernameInput").value = "admin";
+    const params = new URLSearchParams(location.search);
+    if (params.get("verified")) showNotice("Your e-mail address is verified - you can sign in now.");
+    if (params.get("verify_error")) showNotice(params.get("verify_error"), true);
+    if (params.get("registered")) showNotice(`Account created. We sent a verification link to ${params.get("registered")}; open it, then sign in.`);
   } catch (err) {
     showError(`Cannot reach the server: ${err.message}`);
   }
@@ -65,6 +96,7 @@ $("loginForm").addEventListener("submit", async (event) => {
   showError("");
   const username = $("usernameInput").value.trim();
   const password = $("passwordInput").value;
+  if (setupMode && feedback && !feedback.isValid()) { showError(`Password requirements not met: ${feedback.failures().join("; ")}`); return; }
   if (setupMode && password !== $("confirmInput").value) { showError("Passwords do not match"); return; }
   const button = $("loginButton");
   button.disabled = true;
@@ -74,11 +106,14 @@ $("loginForm").addEventListener("submit", async (event) => {
       body.provider = $("providerSelect").value;
       const key = $("apiKeyInput").value.trim();
       if (key) body.api_key = key;
+      const email = $("emailInput").value.trim();
+      if (email) body.email = email;
     }
     await request(setupMode ? "api/auth/setup" : "api/auth/login", body);
     location.replace("./");
   } catch (err) {
     showError(err.message);
+    $("resendButton").classList.toggle("hidden", !/verify your e-mail/i.test(err.message));
     $("passwordInput").focus();
     $("passwordInput").select();
   } finally {
@@ -86,4 +121,5 @@ $("loginForm").addEventListener("submit", async (event) => {
   }
 });
 
+enhancePasswordFields();
 init();

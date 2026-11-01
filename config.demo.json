@@ -5,16 +5,57 @@
     "TSLA"
   ],
   "scan_interval": 15,
+  "data_dir": "bot_data",
+  "strategies_file": "strategies.json",
+  "plugins_dir": "strategies",
+  "log_level": "INFO",
   "data": {
     "provider": "demo",
+    "api_key": "",
     "interval": "5min",
-    "bars": 300
-  },
-  "trading": {
-    "trading_enabled": true
+    "bars": 300,
+    "requests_per_minute": 10000,
+    "requests_per_day": 1000000,
+    "cache_ttl_seconds": 60,
+    "csv_directory": "data",
+    "closed_bars_only": false,
+    "symbols_file": ""
   },
   "market_hours": {
-    "enabled": false
+    "enabled": false,
+    "timezone": "America/New_York",
+    "open": "09:30",
+    "close": "16:00",
+    "weekdays": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ]
+  },
+  "notifications": {
+    "desktop": true,
+    "sound": true,
+    "webhook_url": "",
+    "email": {
+      "enabled": false,
+      "transport": "smtp",
+      "host": "",
+      "port": 587,
+      "username": "",
+      "password": "",
+      "sender": "",
+      "recipients": [],
+      "use_tls": true
+    }
+  },
+  "trading": {
+    "trading_enabled": true,
+    "paper": true,
+    "initial_cash": 100000,
+    "position_size_pct": 0.1,
+    "max_positions": 5
   },
   "web": {
     "host": "127.0.0.1",
@@ -22,7 +63,61 @@
     "username": "admin",
     "password_hash": "",
     "token": "",
+    "secret_key": "",
     "session_hours": 12,
+    "allow_signup": true,
+    "email_verification": "auto",
+    "public_url": "",
+    "base_path": "",
+    "worker_threads": 64,
     "open_browser": true
+  },
+  "ai": {
+    "enabled": true,
+    "base_url": "http://localhost:11434/v1",
+    "api_key": "",
+    "model": "qwen3.5:4b",
+    "timeout_seconds": 45.0
+  },
+  "execution": {
+    "slippage_model": "volume",
+    "slippage_bps": 5,
+    "impact_coefficient": 0.1,
+    "max_participation_pct": 10,
+    "commission_per_order": 1,
+    "commission_per_share": 0,
+    "commission_pct": 0,
+    "min_commission": 0,
+    "limit_order_expiry_bars": 0
+  },
+  "payments": {
+    "provider": "mock",
+    "currency": "USD",
+    "min_amount": 10,
+    "max_amount": 1000000,
+    "stripe": {
+      "secret_key": "",
+      "webhook_secret": "",
+      "api_base": "https://api.stripe.com"
+    }
+  },
+  "fx": {
+    "provider": "demo",
+    "base_currency": "USD",
+    "quote_currencies": [
+      "EUR",
+      "GBP",
+      "JPY",
+      "CHF",
+      "CAD",
+      "AUD",
+      "CNY",
+      "SEK",
+      "NOK",
+      "MXN",
+      "INR",
+      "BRL"
+    ],
+    "cache_ttl_seconds": 3600
   }
 }

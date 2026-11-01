@@ -1,0 +1,282 @@
+symbol,name,type
+AAPL,Apple Inc.,stock
+MSFT,Microsoft Corporation,stock
+GOOGL,Alphabet Inc. (Class A),stock
+GOOG,Alphabet Inc. (Class C),stock
+AMZN,Amazon.com Inc.,stock
+META,Meta Platforms Inc.,stock
+NVDA,NVIDIA Corporation,stock
+TSLA,Tesla Inc.,stock
+AVGO,Broadcom Inc.,stock
+ORCL,Oracle Corporation,stock
+CRM,Salesforce Inc.,stock
+ADBE,Adobe Inc.,stock
+NFLX,Netflix Inc.,stock
+AMD,Advanced Micro Devices Inc.,stock
+INTC,Intel Corporation,stock
+CSCO,Cisco Systems Inc.,stock
+QCOM,Qualcomm Incorporated,stock
+TXN,Texas Instruments Incorporated,stock
+IBM,International Business Machines Corporation,stock
+INTU,Intuit Inc.,stock
+NOW,ServiceNow Inc.,stock
+AMAT,Applied Materials Inc.,stock
+MU,Micron Technology Inc.,stock
+LRCX,Lam Research Corporation,stock
+KLAC,KLA Corporation,stock
+ADI,Analog Devices Inc.,stock
+PANW,Palo Alto Networks Inc.,stock
+CRWD,CrowdStrike Holdings Inc.,stock
+SNPS,Synopsys Inc.,stock
+CDNS,Cadence Design Systems Inc.,stock
+ANET,Arista Networks Inc.,stock
+SHOP,Shopify Inc.,stock
+UBER,Uber Technologies Inc.,stock
+ABNB,Airbnb Inc.,stock
+PLTR,Palantir Technologies Inc.,stock
+SNOW,Snowflake Inc.,stock
+DDOG,Datadog Inc.,stock
+NET,Cloudflare Inc.,stock
+ZS,Zscaler Inc.,stock
+FTNT,Fortinet Inc.,stock
+WDAY,Workday Inc.,stock
+TEAM,Atlassian Corporation,stock
+MDB,MongoDB Inc.,stock
+OKTA,Okta Inc.,stock
+TWLO,Twilio Inc.,stock
+ZM,Zoom Communications Inc.,stock
+DOCU,DocuSign Inc.,stock
+PYPL,PayPal Holdings Inc.,stock
+COIN,Coinbase Global Inc.,stock
+HOOD,Robinhood Markets Inc.,stock
+SOFI,SoFi Technologies Inc.,stock
+DELL,Dell Technologies Inc.,stock
+HPQ,HP Inc.,stock
+HPE,Hewlett Packard Enterprise Company,stock
+SMCI,Super Micro Computer Inc.,stock
+ARM,Arm Holdings plc (ADR),stock
+TSM,Taiwan Semiconductor Manufacturing Company (ADR),stock
+ASML,ASML Holding N.V. (ADR),stock
+SAP,SAP SE (ADR),stock
+SONY,Sony Group Corporation (ADR),stock
+BABA,Alibaba Group Holding Limited (ADR),stock
+JD,JD.com Inc. (ADR),stock
+PDD,PDD Holdings Inc. (ADR),stock
+NIO,NIO Inc. (ADR),stock
+SPOT,Spotify Technology S.A.,stock
+RBLX,Roblox Corporation,stock
+EA,Electronic Arts Inc.,stock
+TTWO,Take-Two Interactive Software Inc.,stock
+U,Unity Software Inc.,stock
+MRVL,Marvell Technology Inc.,stock
+ON,ON Semiconductor Corporation,stock
+NXPI,NXP Semiconductors N.V.,stock
+MCHP,Microchip Technology Incorporated,stock
+ADSK,Autodesk Inc.,stock
+ACN,Accenture plc,stock
+CTSH,Cognizant Technology Solutions Corporation,stock
+FIS,Fidelity National Information Services Inc.,stock
+GLW,Corning Incorporated,stock
+APH,Amphenol Corporation,stock
+TEL,TE Connectivity plc,stock
+MSI,Motorola Solutions Inc.,stock
+ROP,Roper Technologies Inc.,stock
+GDDY,GoDaddy Inc.,stock
+AKAM,Akamai Technologies Inc.,stock
+EBAY,eBay Inc.,stock
+ETSY,Etsy Inc.,stock
+DASH,DoorDash Inc.,stock
+LYFT,Lyft Inc.,stock
+PINS,Pinterest Inc.,stock
+SNAP,Snap Inc.,stock
+RDDT,Reddit Inc.,stock
+TTD,The Trade Desk Inc.,stock
+APP,AppLovin Corporation,stock
+JPM,JPMorgan Chase & Co.,stock
+BAC,Bank of America Corporation,stock
+WFC,Wells Fargo & Company,stock
+C,Citigroup Inc.,stock
+GS,The Goldman Sachs Group Inc.,stock
+MS,Morgan Stanley,stock
+SCHW,The Charles Schwab Corporation,stock
+BLK,BlackRock Inc.,stock
+AXP,American Express Company,stock
+V,Visa Inc.,stock
+MA,Mastercard Incorporated,stock
+BRK.B,Berkshire Hathaway Inc. (Class B),stock
+USB,U.S. Bancorp,stock
+PNC,The PNC Financial Services Group Inc.,stock
+TFC,Truist Financial Corporation,stock
+COF,Capital One Financial Corporation,stock
+SPGI,S&P Global Inc.,stock
+MCO,Moody's Corporation,stock
+ICE,Intercontinental Exchange Inc.,stock
+CME,CME Group Inc.,stock
+MET,MetLife Inc.,stock
+PRU,Prudential Financial Inc.,stock
+AIG,American International Group Inc.,stock
+CB,Chubb Limited,stock
+PGR,The Progressive Corporation,stock
+TRV,The Travelers Companies Inc.,stock
+ALL,The Allstate Corporation,stock
+MMC,Marsh & McLennan Companies Inc.,stock
+AON,Aon plc,stock
+BX,Blackstone Inc.,stock
+KKR,KKR & Co. Inc.,stock
+AFL,Aflac Incorporated,stock
+JNJ,Johnson & Johnson,stock
+UNH,UnitedHealth Group Incorporated,stock
+LLY,Eli Lilly and Company,stock
+PFE,Pfizer Inc.,stock
+MRK,Merck & Co. Inc.,stock
+ABBV,AbbVie Inc.,stock
+TMO,Thermo Fisher Scientific Inc.,stock
+ABT,Abbott Laboratories,stock
+DHR,Danaher Corporation,stock
+BMY,Bristol-Myers Squibb Company,stock
+AMGN,Amgen Inc.,stock
+GILD,Gilead Sciences Inc.,stock
+MDT,Medtronic plc,stock
+ISRG,Intuitive Surgical Inc.,stock
+VRTX,Vertex Pharmaceuticals Incorporated,stock
+REGN,Regeneron Pharmaceuticals Inc.,stock
+CVS,CVS Health Corporation,stock
+CI,The Cigna Group,stock
+ELV,Elevance Health Inc.,stock
+HUM,Humana Inc.,stock
+ZTS,Zoetis Inc.,stock
+SYK,Stryker Corporation,stock
+BSX,Boston Scientific Corporation,stock
+BDX,Becton Dickinson and Company,stock
+MRNA,Moderna Inc.,stock
+BIIB,Biogen Inc.,stock
+HCA,HCA Healthcare Inc.,stock
+MCK,McKesson Corporation,stock
+DXCM,DexCom Inc.,stock
+IDXX,IDEXX Laboratories Inc.,stock
+NVO,Novo Nordisk A/S (ADR),stock
+AZN,AstraZeneca PLC (ADR),stock
+WMT,Walmart Inc.,stock
+COST,Costco Wholesale Corporation,stock
+HD,The Home Depot Inc.,stock
+LOW,Lowe's Companies Inc.,stock
+TGT,Target Corporation,stock
+MCD,McDonald's Corporation,stock
+SBUX,Starbucks Corporation,stock
+NKE,NIKE Inc.,stock
+KO,The Coca-Cola Company,stock
+PEP,PepsiCo Inc.,stock
+PG,The Procter & Gamble Company,stock
+CL,Colgate-Palmolive Company,stock
+KMB,Kimberly-Clark Corporation,stock
+PM,Philip Morris International Inc.,stock
+MO,Altria Group Inc.,stock
+MDLZ,Mondelez International Inc.,stock
+KHC,The Kraft Heinz Company,stock
+GIS,General Mills Inc.,stock
+HSY,The Hershey Company,stock
+EL,The Estee Lauder Companies Inc.,stock
+DIS,The Walt Disney Company,stock
+CMCSA,Comcast Corporation,stock
+WBD,Warner Bros. Discovery Inc.,stock
+T,AT&T Inc.,stock
+VZ,Verizon Communications Inc.,stock
+TMUS,T-Mobile US Inc.,stock
+CHTR,Charter Communications Inc.,stock
+BKNG,Booking Holdings Inc.,stock
+MAR,Marriott International Inc.,stock
+HLT,Hilton Worldwide Holdings Inc.,stock
+CMG,Chipotle Mexican Grill Inc.,stock
+YUM,Yum! Brands Inc.,stock
+LULU,Lululemon Athletica Inc.,stock
+TJX,The TJX Companies Inc.,stock
+ROST,Ross Stores Inc.,stock
+DG,Dollar General Corporation,stock
+DLTR,Dollar Tree Inc.,stock
+KR,The Kroger Co.,stock
+F,Ford Motor Company,stock
+GM,General Motors Company,stock
+RIVN,Rivian Automotive Inc.,stock
+LCID,Lucid Group Inc.,stock
+TM,Toyota Motor Corporation (ADR),stock
+HMC,Honda Motor Co. Ltd. (ADR),stock
+GME,GameStop Corp.,stock
+AMC,AMC Entertainment Holdings Inc.,stock
+CCL,Carnival Corporation,stock
+RCL,Royal Caribbean Cruises Ltd.,stock
+DAL,Delta Air Lines Inc.,stock
+UAL,United Airlines Holdings Inc.,stock
+AAL,American Airlines Group Inc.,stock
+LUV,Southwest Airlines Co.,stock
+BA,The Boeing Company,stock
+CAT,Caterpillar Inc.,stock
+DE,Deere & Company,stock
+HON,Honeywell International Inc.,stock
+GE,GE Aerospace,stock
+RTX,RTX Corporation,stock
+LMT,Lockheed Martin Corporation,stock
+NOC,Northrop Grumman Corporation,stock
+GD,General Dynamics Corporation,stock
+MMM,3M Company,stock
+UPS,United Parcel Service Inc.,stock
+FDX,FedEx Corporation,stock
+UNP,Union Pacific Corporation,stock
+CSX,CSX Corporation,stock
+NSC,Norfolk Southern Corporation,stock
+ETN,Eaton Corporation plc,stock
+EMR,Emerson Electric Co.,stock
+ITW,Illinois Tool Works Inc.,stock
+PH,Parker-Hannifin Corporation,stock
+WM,Waste Management Inc.,stock
+XOM,Exxon Mobil Corporation,stock
+CVX,Chevron Corporation,stock
+COP,ConocoPhillips,stock
+SLB,Schlumberger Limited,stock
+EOG,EOG Resources Inc.,stock
+OXY,Occidental Petroleum Corporation,stock
+PSX,Phillips 66,stock
+MPC,Marathon Petroleum Corporation,stock
+VLO,Valero Energy Corporation,stock
+KMI,Kinder Morgan Inc.,stock
+LIN,Linde plc,stock
+APD,Air Products and Chemicals Inc.,stock
+SHW,The Sherwin-Williams Company,stock
+FCX,Freeport-McMoRan Inc.,stock
+NEM,Newmont Corporation,stock
+NUE,Nucor Corporation,stock
+DOW,Dow Inc.,stock
+NEE,NextEra Energy Inc.,stock
+DUK,Duke Energy Corporation,stock
+SO,The Southern Company,stock
+D,Dominion Energy Inc.,stock
+AEP,American Electric Power Company Inc.,stock
+EXC,Exelon Corporation,stock
+PLD,Prologis Inc.,stock
+AMT,American Tower Corporation,stock
+EQIX,Equinix Inc.,stock
+O,Realty Income Corporation,stock
+SPG,Simon Property Group Inc.,stock
+CCI,Crown Castle Inc.,stock
+PSA,Public Storage,stock
+SPY,SPDR S&P 500 ETF Trust,etf
+QQQ,Invesco QQQ Trust,etf
+DIA,SPDR Dow Jones Industrial Average ETF Trust,etf
+IWM,iShares Russell 2000 ETF,etf
+VTI,Vanguard Total Stock Market ETF,etf
+VOO,Vanguard S&P 500 ETF,etf
+XLF,Financial Select Sector SPDR Fund,etf
+XLK,Technology Select Sector SPDR Fund,etf
+XLE,Energy Select Sector SPDR Fund,etf
+XLV,Health Care Select Sector SPDR Fund,etf
+GLD,SPDR Gold Shares,etf
+SLV,iShares Silver Trust,etf
+TLT,iShares 20+ Year Treasury Bond ETF,etf
+ARKK,ARK Innovation ETF,etf
+EEM,iShares MSCI Emerging Markets ETF,etf
+EFA,iShares MSCI EAFE ETF,etf
+VNQ,Vanguard Real Estate ETF,etf
+HYG,iShares iBoxx $ High Yield Corporate Bond ETF,etf
+LQD,iShares iBoxx $ Investment Grade Corporate Bond ETF,etf
+USO,United States Oil Fund,etf
+SMH,VanEck Semiconductor ETF,etf
+IBIT,iShares Bitcoin Trust ETF,etf
