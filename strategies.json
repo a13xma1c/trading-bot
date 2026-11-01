@@ -1,0 +1,57 @@
+[
+  {
+    "name": "RSI Reversal",
+    "buy_rule": "crossover(rsi(period), oversold)",
+    "sell_rule": "crossunder(rsi(period), overbought)",
+    "description": "Buy when RSI leaves oversold territory, sell when it leaves overbought.",
+    "symbols": [],
+    "params": {
+      "period": 14.0,
+      "oversold": 30.0,
+      "overbought": 70.0
+    },
+    "enabled": true,
+    "stop_loss_pct": 0.0,
+    "take_profit_pct": 0.0,
+    "cooldown_bars": 5
+  },
+  {
+    "name": "MA Crossover",
+    "buy_rule": "crossover(sma(fast), sma(slow))",
+    "sell_rule": "crossunder(sma(fast), sma(slow))",
+    "description": "Classic fast/slow moving-average crossover.",
+    "symbols": [],
+    "params": {
+      "fast": 5.0,
+      "slow": 20.0
+    },
+    "enabled": true,
+    "stop_loss_pct": 0.0,
+    "take_profit_pct": 0.0,
+    "cooldown_bars": 0
+  },
+  {
+    "name": "MACD Momentum",
+    "buy_rule": "crossover(macd(), macd_signal()) and volume > sma(20, volume)",
+    "sell_rule": "crossunder(macd(), macd_signal())",
+    "description": "MACD line crossing its signal line, filtered by volume.",
+    "symbols": [],
+    "params": {},
+    "enabled": true,
+    "stop_loss_pct": 2.0,
+    "take_profit_pct": 4.0,
+    "cooldown_bars": 0
+  },
+  {
+    "name": "Bollinger Bounce",
+    "buy_rule": "close < bb_lower(20, 2) and rsi(14) < 40",
+    "sell_rule": "close > bb_middle(20, 2)",
+    "description": "Mean reversion: buy a close below the lower band, sell at the middle band.",
+    "symbols": [],
+    "params": {},
+    "enabled": false,
+    "stop_loss_pct": 0.0,
+    "take_profit_pct": 0.0,
+    "cooldown_bars": 0
+  }
+]

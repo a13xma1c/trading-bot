@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Trading Bot</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&family=Roboto+Mono&display=swap">
+  <link rel="stylesheet" href="/static/css/material.css">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='6' fill='%231d4a8f'/%3E%3Cpath fill='%23d6e3ff' d='M3.5 18.49l6-6.01 4 4L22 6.92l-1.41-1.41-7.09 7.97-4-4L2 16.99z'/%3E%3C/svg%3E">
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-chart" viewBox="0 0 24 24"><path d="M3.5 18.49l6-6.01 4 4L22 6.92l-1.41-1.41-7.09 7.97-4-4L2 16.99z"/></symbol>
+    <symbol id="i-strategy" viewBox="0 0 24 24"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V5h14v14zM7 10h2v7H7zm4-3h2v10h-2zm4 6h2v4h-2z"/></symbol>
+    <symbol id="i-wallet" viewBox="0 0 24 24"><path d="M21 18v1c0 1.1-.9 2-2 2H5c-1.11 0-2-.9-2-2V5c0-1.1.89-2 2-2h14c1.1 0 2 .9 2 2v1h-9c-1.11 0-2 .9-2 2v8c0 1.1.89 2 2 2h9zm-9-2h10V8H12v8zm4-2.5c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5z"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></symbol>
+    <symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></symbol>
+    <symbol id="i-stop" viewBox="0 0 24 24"><path d="M6 6h12v12H6z"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M17.65 6.35A7.958 7.958 0 0 0 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 0 1 12 18c-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></symbol>
+    <symbol id="i-add" viewBox="0 0 24 24"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></symbol>
+    <symbol id="i-delete" viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></symbol>
+    <symbol id="i-science" viewBox="0 0 24 24"><path d="M13 11.33 18 18H6l5-6.67V6h2m2.96-2H8.04c-.42 0-.65.48-.39.81L9 6.5v4.17L3.2 18.4c-.49.66-.02 1.6.8 1.6h16c.82 0 1.29-.94.8-1.6L15 10.67V6.5l1.35-1.69c.26-.33.03-.81-.39-.81z"/></symbol>
+    <symbol id="i-arrow-down" viewBox="0 0 24 24"><path d="M7 10l5 5 5-5z"/></symbol>
+    <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M11 21h-1l1-7H7.5c-.58 0-.57-.32-.38-.66.19-.34.05-.08.07-.12C8.48 10.94 10.42 7.54 13 3h1l-1 7h3.5c.49 0 .56.33.47.51l-.07.15C12.96 17.55 11 21 11 21z"/></symbol>
+    <symbol id="i-save" viewBox="0 0 24 24"><path d="M17 3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V7l-4-4zm2 16H5V5h11.17L19 7.83V19zm-7-7c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3zM6 6h9v4H6z"/></symbol>
+  </defs>
+</svg>
+
+<div class="app">
+  <nav class="nav-rail" aria-label="Sections">
+    <div class="brand" title="Trading Bot"><svg class="icon"><use href="#i-chart"/></svg></div>
+    <button class="nav-item active" id="navDashboard" data-view="dashboard"><span class="indicator"><svg class="icon"><use href="#i-chart"/></svg></span><span class="label-medium">Dashboard</span></button>
+    <button class="nav-item" id="navStrategies" data-view="strategies"><span class="indicator"><svg class="icon"><use href="#i-strategy"/></svg></span><span class="label-medium">Strategies</span></button>
+    <button class="nav-item" id="navPositions" data-view="positions"><span class="indicator"><svg class="icon"><use href="#i-wallet"/></svg></span><span class="label-medium">Positions</span></button>
+    <button class="nav-item" id="navSettings" data-view="settings"><span class="indicator"><svg class="icon"><use href="#i-settings"/></svg></span><span class="label-medium">Settings</span></button>
+  </nav>
+
+  <div class="main">
+    <header class="top-app-bar">
+      <h1 class="title-large">Trading Bot</h1>
+      <span class="chip off" id="engineStateChip"><span class="dot"></span><span id="engineStateText">Engine stopped</span></span>
+      <span class="chip off" id="marketChip"><span id="marketChipText">Market</span></span>
+      <span class="body-small muted" id="budgetLabel"></span>
+      <span class="spacer"></span>
+      <div class="actions">
+        <button class="btn tonal" id="scanNowButton" title="Refresh every symbol now (ignores pacing, respects API limits) and evaluate strategies"><svg class="icon"><use href="#i-bolt"/></svg>Scan now</button>
+        <button class="btn filled" id="startButton"><svg class="icon"><use href="#i-play"/></svg><span id="startButtonLabel">Start</span></button>
+      </div>
+    </header>
+    <div class="progress" id="progress"></div>
+
+    <main class="content" id="views">
+      <!-- ------------------------------------------------------ dashboard -->
+      <section class="view active" id="view-dashboard">
+        <div class="grid dashboard">
+          <div class="card">
+            <div class="card-header"><h2 class="title-medium">Watchlist</h2></div>
+            <form class="row" id="watchlistForm" autocomplete="off">
+              <div class="text-field dense" style="flex:1">
+                <div class="field"><input id="watchlistSymbolInput" placeholder=" " maxlength="16" aria-label="Symbol"><label for="watchlistSymbolInput">Add symbol (e.g. AAPL)</label></div>
+              </div>
+              <button class="btn tonal" id="watchlistAddButton" type="submit"><svg class="icon"><use href="#i-add"/></svg>Add</button>
+            </form>
+            <div class="table-wrap" style="margin-top:8px">
+              <table class="data-table compact" id="watchlistTable">
+                <thead><tr><th>Symbol</th><th class="num">Last</th><th class="num">Chg %</th><th>Updated</th><th></th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="card chart-card">
+            <div class="chart-toolbar">
+              <h2 class="title-medium" id="chartTitle">—</h2>
+              <span class="chart-status" id="chartStatusLabel"></span>
+              <span class="spacer"></span>
+              <div class="text-field dense" style="width:240px">
+                <div class="field"><select id="overlayStrategySelect" aria-label="Overlay strategy"><option value="">None</option></select><label for="overlayStrategySelect">Overlay strategy</label><svg class="icon select-arrow"><use href="#i-arrow-down"/></svg></div>
+              </div>
+              <button class="btn outlined" id="resetViewButton">Reset view</button>
+              <button class="btn tonal" id="refreshButton" title="Fetch the latest bars for this symbol now"><svg class="icon"><use href="#i-refresh"/></svg>Refresh</button>
+            </div>
+            <div class="chart-host"><canvas id="chartCanvas"></canvas></div>
+          </div>
+
+          <div class="card span-2">
+            <div class="card-header"><h2 class="title-medium">Signals</h2><span class="body-small muted" id="signalsCount"></span></div>
+            <div class="table-wrap" style="max-height:320px">
+              <table class="data-table" id="signalsTable">
+                <thead><tr><th>Time</th><th>Symbol</th><th>Action</th><th class="num">Price</th><th>Strategy</th><th>Executed</th><th>Reason</th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ----------------------------------------------------- strategies -->
+      <section class="view" id="view-strategies">
+        <div class="grid strategies">
+          <div class="card">
+            <div class="card-header"><h2 class="title-medium">Strategies</h2><span class="spacer"></span>
+              <button class="icon-btn" id="newStrategyButton" title="New strategy"><svg class="icon"><use href="#i-add"/></svg></button>
+            </div>
+            <div class="list" id="strategyList"></div>
+          </div>
+
+          <div class="card elevated">
+            <div class="card-header"><h2 class="title-medium" id="editorTitle">Strategy editor</h2><span class="spacer"></span>
+              <button class="icon-btn" id="duplicateStrategyButton" title="Duplicate"><svg class="icon"><use href="#i-copy"/></svg></button>
+              <button class="icon-btn error" id="deleteStrategyButton" title="Delete"><svg class="icon"><use href="#i-delete"/></svg></button>
+            </div>
+            <form class="stack" id="strategyForm" autocomplete="off">
+              <div class="text-field"><div class="field"><input id="strategyNameInput" placeholder=" " required><label for="strategyNameInput">Name</label></div></div>
+              <div class="text-field"><div class="field"><input id="strategyDescriptionInput" placeholder=" "><label for="strategyDescriptionInput">Description</label></div></div>
+              <div class="text-field"><div class="field"><input id="strategySymbolsInput" placeholder=" "><label for="strategySymbolsInput">Symbols</label></div><div class="supporting">Comma separated; leave empty for the whole watchlist</div></div>
+              <div class="text-field"><div class="field"><textarea id="buyRuleInput" placeholder=" " rows="2"></textarea><label for="buyRuleInput">Buy rule</label></div><div class="supporting">e.g. crossover(sma(fast), sma(slow)) and rsi(14) &lt; 70</div></div>
+              <div class="text-field"><div class="field"><textarea id="sellRuleInput" placeholder=" " rows="2"></textarea><label for="sellRuleInput">Sell rule (optional)</label></div></div>
+              <div>
+                <div class="row between"><span class="title-small">Parameters</span><button type="button" class="btn text" id="addParamButton"><svg class="icon"><use href="#i-add"/></svg>Add parameter</button></div>
+                <table class="data-table params-table" id="paramsTable"><thead><tr><th>Name</th><th>Value</th><th></th></tr></thead><tbody></tbody></table>
+              </div>
+              <div class="row">
+                <div class="text-field dense" style="flex:1"><div class="field"><input id="stopLossInput" type="number" min="0" step="0.1" placeholder=" "><label for="stopLossInput">Stop loss %</label></div></div>
+                <div class="text-field dense" style="flex:1"><div class="field"><input id="takeProfitInput" type="number" min="0" step="0.1" placeholder=" "><label for="takeProfitInput">Take profit %</label></div></div>
+                <div class="text-field dense" style="flex:1"><div class="field"><input id="cooldownInput" type="number" min="0" step="1" placeholder=" "><label for="cooldownInput">Cooldown bars</label></div></div>
+              </div>
+              <label class="switch"><input type="checkbox" id="strategyEnabledSwitch"><span class="track"></span><span>Enabled (evaluated by the live scanner)</span></label>
+              <div class="row">
+                <button type="button" class="btn outlined" id="validateStrategyButton"><svg class="icon"><use href="#i-check"/></svg>Validate</button>
+                <button type="submit" class="btn filled" id="saveStrategyButton"><svg class="icon"><use href="#i-save"/></svg>Save</button>
+                <button type="button" class="btn tonal" id="showOnChartButton"><svg class="icon"><use href="#i-chart"/></svg>Show on chart</button>
+                <button type="button" class="btn tonal" id="backtestButton"><svg class="icon"><use href="#i-science"/></svg>Backtest…</button>
+              </div>
+              <div class="body-medium" id="strategyStatusLabel" role="status"></div>
+            </form>
+          </div>
+
+          <div class="card">
+            <div class="card-header"><h2 class="title-medium">Rule language</h2></div>
+            <div class="body-small stack" id="rulesHelp"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ------------------------------------------------------ positions -->
+      <section class="view" id="view-positions">
+        <div class="stack">
+          <div class="card">
+            <div class="card-header"><h2 class="title-medium">Account</h2><span class="spacer"></span><button class="btn outlined" id="resetPaperAccountButton">Reset paper account</button></div>
+            <dl class="kv" id="accountSummary"></dl>
+          </div>
+          <div class="card">
+            <div class="card-header"><h2 class="title-medium">Open positions</h2></div>
+            <div class="table-wrap">
+              <table class="data-table" id="positionsTable">
+                <thead><tr><th>Symbol</th><th class="num">Qty</th><th class="num">Avg price</th><th class="num">Last</th><th class="num">P&amp;L</th><th class="num">P&amp;L %</th><th class="num">Stop</th><th class="num">Target</th><th>Strategy</th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-header"><h2 class="title-medium">Fills</h2></div>
+            <div class="table-wrap" style="max-height:300px">
+              <table class="data-table" id="fillsTable">
+                <thead><tr><th>Time</th><th>Symbol</th><th>Side</th><th class="num">Qty</th><th class="num">Price</th><th>Strategy</th><th class="num">Realized P&amp;L</th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ------------------------------------------------------- settings -->
+      <section class="view" id="view-settings">
+        <form id="settingsForm" autocomplete="off">
+          <div class="grid settings">
+            <div class="card stack">
+              <h2 class="title-medium" style="margin:0">Market data</h2>
+              <div class="text-field"><div class="field"><select id="settingsProvider"></select><label for="settingsProvider">Provider</label><svg class="icon select-arrow"><use href="#i-arrow-down"/></svg></div><div class="supporting" id="providerNote"></div></div>
+              <div class="text-field"><div class="field"><input id="settingsApiKey" type="password" placeholder=" "><label for="settingsApiKey">API key</label></div><div class="supporting" id="apiKeyNote">Leave blank to keep the stored key; or set TRADING_BOT_API_KEY</div></div>
+              <div class="row">
+                <div class="text-field" style="flex:1"><div class="field"><select id="settingsInterval"></select><label for="settingsInterval">Bar interval</label><svg class="icon select-arrow"><use href="#i-arrow-down"/></svg></div></div>
+                <div class="text-field" style="flex:1"><div class="field"><input id="settingsBars" type="number" min="30" max="5000" placeholder=" "><label for="settingsBars">Bars per symbol</label></div></div>
+              </div>
+              <div class="row">
+                <div class="text-field" style="flex:1"><div class="field"><input id="settingsScanInterval" type="number" min="5" placeholder=" "><label for="settingsScanInterval">Scan every (s)</label></div></div>
+                <div class="text-field" style="flex:1"><div class="field"><input id="settingsPerMinute" type="number" min="1" placeholder=" "><label for="settingsPerMinute">Requests / min</label></div></div>
+                <div class="text-field" style="flex:1"><div class="field"><input id="settingsPerDay" type="number" min="1" placeholder=" "><label for="settingsPerDay">Requests / day</label></div></div>
+              </div>
+              <label class="switch"><input type="checkbox" id="settingsClosedBarsOnly"><span class="track"></span><span>Ignore the still-forming intraday bar</span></label>
+            </div>
+
+            <div class="card stack">
+              <h2 class="title-medium" style="margin:0">Market hours</h2>
+              <div class="body-small muted">The daily request budget is paced over the session; polling pauses when closed.</div>
+              <label class="switch"><input type="checkbox" id="settingsMarketHoursEnabled"><span class="track"></span><span>Enabled (disable for 24h markets such as crypto)</span></label>
+              <div class="text-field"><div class="field"><input id="settingsTimezone" placeholder=" "><label for="settingsTimezone">Time zone (IANA)</label></div></div>
+              <div class="row">
+                <div class="text-field" style="flex:1"><div class="field"><input id="settingsOpen" placeholder=" "><label for="settingsOpen">Open (HH:MM)</label></div></div>
+                <div class="text-field" style="flex:1"><div class="field"><input id="settingsClose" placeholder=" "><label for="settingsClose">Close (HH:MM)</label></div></div>
+              </div>
+            </div>
+
+            <div class="card stack">
+              <h2 class="title-medium" style="margin:0">Notifications</h2>
+              <label class="switch"><input type="checkbox" id="settingsDesktop"><span class="track"></span><span>Browser notifications</span></label>
+              <label class="switch"><input type="checkbox" id="settingsSound"><span class="track"></span><span>Play a sound</span></label>
+              <div class="text-field"><div class="field"><input id="settingsWebhook" placeholder=" "><label for="settingsWebhook">Webhook URL</label></div><div class="supporting">Slack / Discord / Mattermost compatible JSON POST (optional)</div></div>
+            </div>
+
+            <div class="card stack">
+              <h2 class="title-medium" style="margin:0">Trading</h2>
+              <label class="switch"><input type="checkbox" id="settingsTradingEnabled"><span class="track"></span><span>Execute signals automatically (paper broker)</span></label>
+              <div class="row">
+                <div class="text-field" style="flex:1"><div class="field"><input id="settingsInitialCash" type="number" min="100" placeholder=" "><label for="settingsInitialCash">Initial cash</label></div></div>
+                <div class="text-field" style="flex:1"><div class="field"><input id="settingsPositionSize" type="number" min="1" max="100" placeholder=" "><label for="settingsPositionSize">Position size %</label></div></div>
+                <div class="text-field" style="flex:1"><div class="field"><input id="settingsMaxPositions" type="number" min="1" max="100" placeholder=" "><label for="settingsMaxPositions">Max positions</label></div></div>
+              </div>
+            </div>
+          </div>
+          <div class="row" style="margin-top:16px">
+            <button type="submit" class="btn filled" id="settingsSaveButton"><svg class="icon"><use href="#i-save"/></svg>Save settings</button>
+            <span class="body-medium" id="settingsStatus" role="status"></span>
+          </div>
+        </form>
+      </section>
+    </main>
+  </div>
+</div>
+
+<!-- ------------------------------------------------------------ dialogs -->
+<dialog id="backtestDialog">
+  <div class="dialog-body" style="width:900px">
+    <div class="row between"><h2 class="headline-small" id="backtestTitle">Backtest</h2><button class="icon-btn" id="backtestCloseButton" title="Close"><svg class="icon"><use href="#i-close"/></svg></button></div>
+    <div class="row">
+      <div class="text-field dense" style="width:160px"><div class="field"><select id="backtestSymbolSelect"></select><label for="backtestSymbolSelect">Symbol</label><svg class="icon select-arrow"><use href="#i-arrow-down"/></svg></div></div>
+      <div class="text-field dense" style="width:160px"><div class="field"><input id="backtestCashInput" type="number" min="100" value="10000" placeholder=" "><label for="backtestCashInput">Cash</label></div></div>
+      <div class="text-field dense" style="width:180px"><div class="field"><input id="backtestCommissionInput" type="number" min="0" step="0.01" value="0" placeholder=" "><label for="backtestCommissionInput">Commission / fill</label></div></div>
+      <button class="btn filled" id="backtestRunButton"><svg class="icon"><use href="#i-play"/></svg>Run</button>
+      <span class="body-medium" id="backtestStatus"></span>
+    </div>
+    <div class="grid" style="grid-template-columns: 300px 1fr">
+      <div class="table-wrap" style="max-height:220px"><table class="data-table" id="backtestStatsTable"><thead><tr><th>Metric</th><th class="num">Value</th></tr></thead><tbody></tbody></table></div>
+      <canvas class="equity-canvas" id="equityCanvas" height="180"></canvas>
+    </div>
+    <div class="table-wrap" style="max-height:240px">
+      <table class="data-table" id="backtestTradesTable">
+        <thead><tr><th>Entry</th><th>Exit</th><th class="num">Entry px</th><th class="num">Exit px</th><th class="num">P&amp;L</th><th class="num">Return %</th><th>Exit reason</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="dialog-actions"><button class="btn text" id="backtestShowButton">Show trades on chart</button><button class="btn tonal" id="backtestDoneButton">Close</button></div>
+  </div>
+</dialog>
+
+<dialog id="confirmDialog">
+  <div class="dialog-body" style="width:420px">
+    <h2 class="headline-small" id="confirmTitle">Confirm</h2>
+    <p class="body-medium" id="confirmText"></p>
+    <div class="dialog-actions"><button class="btn text" id="confirmCancelButton">Cancel</button><button class="btn filled" id="confirmOkButton">Confirm</button></div>
+  </div>
+</dialog>
+
+<dialog id="tokenDialog">
+  <div class="dialog-body" style="width:420px">
+    <h2 class="headline-small">API token required</h2>
+    <p class="body-medium">This server is protected with an API token (web.token / TRADING_BOT_WEB_TOKEN).</p>
+    <div class="text-field"><div class="field"><input id="tokenInput" type="password" placeholder=" "><label for="tokenInput">Token</label></div></div>
+    <div class="dialog-actions"><button class="btn filled" id="tokenOkButton">Continue</button></div>
+  </div>
+</dialog>
+
+<div class="snackbar" id="snackbar" role="status" aria-live="polite"><span id="snackbarText"></span><span class="spacer"></span><button class="btn text" id="snackbarAction">Dismiss</button></div>
+
+<script type="module" src="/static/js/app.js"></script>
+</body>
+</html>
