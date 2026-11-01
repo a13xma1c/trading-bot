@@ -10,7 +10,7 @@ from typing import Any
 
 from .broker import PaperBroker
 from .config import AppConfig
-from .data import MarketDataService, RateLimiter, create_provider
+from .data import MarketDataProvider, MarketDataService, RateLimiter, create_provider
 from .engine import TradingEngine
 from .notify import Notifier, build_notifier
 from .storage import Storage
@@ -55,14 +55,21 @@ def configure_logging(level: str = "INFO", log_dir: str | None = None) -> None:
     root._trading_bot_configured = True  # type: ignore[attr-defined]
 
 
-def build_engine(config: AppConfig, notifier: Notifier | None = None, provider=None) -> TradingEngine:
+def build_data_service(config: AppConfig, provider: MarketDataProvider | None = None) -> MarketDataService:
+    """Provider + persisted rate limiter + cache for the configured data source."""
     data_dir = config.data_dir_path
     data_dir.mkdir(parents=True, exist_ok=True)
-
     provider = provider or create_provider(config.data.provider, config.data.api_key, config.csv_directory_path)
     per_minute, per_day = config.data.budget()
     limiter = RateLimiter(per_minute, per_day, state_file=data_dir / f"ratelimit_{provider.name}.json")
-    service = MarketDataService(provider, limiter, cache_ttl=config.data.cache_ttl_seconds)
+    return MarketDataService(provider, limiter, cache_ttl=config.data.cache_ttl_seconds)
+
+
+def build_engine(config: AppConfig, notifier: Notifier | None = None,
+                 provider: MarketDataProvider | None = None) -> TradingEngine:
+    data_dir = config.data_dir_path
+    data_dir.mkdir(parents=True, exist_ok=True)
+    service = build_data_service(config, provider)
 
     store = StrategyStore(config.strategies_path, plugin_dir=config.plugins_path)
     store.load()
@@ -70,4 +77,4 @@ def build_engine(config: AppConfig, notifier: Notifier | None = None, provider=N
     broker = PaperBroker(config.trading.initial_cash, state_file=data_dir / "paper_broker.json")
     storage = Storage(data_dir / "history.sqlite3")
     notifier = notifier or build_notifier(config.notifications)
-    return TradingEngine(config, service, store, notifier, broker, storage)
+    return TradingEngine(config, service, store, notifier, broker, storage, data_factory=build_data_service)

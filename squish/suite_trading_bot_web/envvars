@@ -1,2 +1,0 @@
-# URL of the running Trading Bot web server under test (see README.md).
-TRADING_BOT_URL=http://127.0.0.1:8080/

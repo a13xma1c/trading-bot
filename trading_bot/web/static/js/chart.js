@@ -37,7 +37,8 @@ export class CandleChart {
   }
 
   // ------------------------------------------------------------ data
-  setData(symbol, bars, { keepView = true } = {}) {
+  setData(symbol, bars, { keepView = true, message = "" } = {}) {
+    this.message = message;
     const previousLen = this.bars.length;
     const sameSymbol = symbol === this.symbol;
     this.symbol = symbol;
@@ -159,7 +160,7 @@ export class CandleChart {
     if (!this.bars.length) {
       ctx.fillStyle = TEXT;
       ctx.textAlign = "center";
-      ctx.fillText(this.symbol ? `Loading ${this.symbol}…` : "No data", width / 2, height / 2);
+      ctx.fillText(this.message || (this.symbol ? `Loading ${this.symbol}…` : "No data"), width / 2, height / 2);
       return;
     }
     const from = Math.max(0, Math.floor(this.from));

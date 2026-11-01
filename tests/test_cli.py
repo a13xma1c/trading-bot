@@ -117,7 +117,20 @@ def test_serve_command_runs_web_server(demo_project: Path, monkeypatch: pytest.M
     with urllib.request.urlopen(f"{started['url']}api/health", timeout=5) as response:  # noqa: S310
         assert json.loads(response.read())["ok"] is True
     with urllib.request.urlopen(f"{started['url']}", timeout=5) as response:  # noqa: S310
-        assert b"<title>Trading Bot</title>" in response.read()
+        assert "/login" in response.url and b'id="loginForm"' in response.read()  # anonymous -> login page
     srv.should_exit = True
     thread.join(10)
     assert not thread.is_alive()
+
+
+def test_set_password_command(demo_project: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    from trading_bot.config import AppConfig
+    from trading_bot.web.auth import verify_password
+
+    assert main(["set-password", "--username", "owner", "--password", "short"]) == 1
+    assert "8 characters" in capsys.readouterr().err
+    assert main(["set-password", "--username", "owner", "--password", "a proper password"]) == 0
+    assert "owner" in capsys.readouterr().out
+    cfg = AppConfig.load(demo_project / "config.json")
+    assert cfg.web.username == "owner" and verify_password("a proper password", cfg.web.password_hash)
+    assert "a proper password" not in (demo_project / "config.json").read_text()

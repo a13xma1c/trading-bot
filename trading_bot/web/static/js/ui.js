@@ -1,22 +1,16 @@
 /** API client, WebSocket connection and Material components (snackbar, dialogs, notifications). */
 
-const TOKEN_KEY = "trading-bot-token";
-
 export const api = {
-  token: localStorage.getItem(TOKEN_KEY) || "",
-
-  setToken(token) {
-    this.token = token || "";
-    if (token) localStorage.setItem(TOKEN_KEY, token); else localStorage.removeItem(TOKEN_KEY);
-  },
-
   async request(method, path, body) {
     const headers = { Accept: "application/json" };
     if (body !== undefined) headers["Content-Type"] = "application/json";
-    if (this.token) headers.Authorization = `Bearer ${this.token}`;
-    const response = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+    const response = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), credentials: "same-origin" });
     let data = null;
     try { data = await response.json(); } catch { data = null; }
+    if (response.status === 401 && !path.startsWith("/api/auth/")) {
+      location.replace("/login");  // session expired or signed out elsewhere
+      throw new Error("Authentication required");
+    }
     if (!response.ok) {
       const error = new Error(detailText(data) || `${response.status} ${response.statusText}`);
       error.status = response.status;
@@ -46,11 +40,14 @@ export function connectEvents(onMessage, onState) {
   let delay = 1000;
   const open = () => {
     const proto = location.protocol === "https:" ? "wss" : "ws";
-    const token = api.token ? `?token=${encodeURIComponent(api.token)}` : "";
-    socket = new WebSocket(`${proto}://${location.host}/ws${token}`);
+    socket = new WebSocket(`${proto}://${location.host}/ws`);  // authenticated by the session cookie
     socket.onopen = () => { delay = 1000; onState?.(true); };
     socket.onmessage = (event) => { try { onMessage(JSON.parse(event.data)); } catch (err) { console.error(err); } };
-    socket.onclose = () => { onState?.(false); if (!closed) setTimeout(open, delay = Math.min(delay * 2, 15000)); };
+    socket.onclose = (event) => {
+      onState?.(false);
+      if (event.code === 4401) { location.replace("/login"); return; }
+      if (!closed) setTimeout(open, delay = Math.min(delay * 2, 15000));
+    };
     socket.onerror = () => socket.close();
   };
   open();
@@ -91,18 +88,6 @@ export function confirmDialog(title, text, { okLabel = "Confirm", danger = false
     cancel.onclick = () => done(false);
     dialog.onclose = () => resolve(false);
     if (!dialog.open) dialog.showModal();
-  });
-}
-
-export function askToken() {
-  return new Promise((resolve) => {
-    const dialog = document.getElementById("tokenDialog");
-    const input = document.getElementById("tokenInput");
-    const ok = document.getElementById("tokenOkButton");
-    ok.onclick = () => { dialog.close(); resolve(input.value.trim()); };
-    input.value = "";
-    if (!dialog.open) dialog.showModal();
-    input.focus();
   });
 }
 

@@ -72,22 +72,48 @@ pip install -r requirements-dev.txt
 python -m trading_bot
 ```
 
-The server binds to `127.0.0.1:8080` by default. To reach it from other
-machines set `web.host` (e.g. `0.0.0.0`) **and** an API token (`web.token` or
-`TRADING_BOT_WEB_TOKEN`); the UI asks for the token once and stores it in the
-browser. Put a TLS-terminating reverse proxy in front of it for anything but a
-private network.
+The server binds to `127.0.0.1:8080` by default.
+
+### Login
+
+The web UI requires a login. On the very first start no password exists yet,
+so the browser shows a **first-run setup page** where you create the
+administrator account and can optionally choose the market-data provider and
+enter its API key (both can be changed later under *Settings*); alternatively
+set the password from the command line:
+
+```bash
+uv run trading-bot set-password --username admin      # prompts for the password
+TRADING_BOT_WEB_PASSWORD=... uv run trading-bot serve # or supply it via the environment (containers)
+```
+
+Passwords are stored as PBKDF2-SHA256 hashes in `config.json` (`web.username`,
+`web.password_hash`). Sessions use an HttpOnly cookie and expire after
+`web.session_hours`; five failed logins lock the client out for a minute. You
+can change the credentials under *Settings → Account* (all other sessions are
+signed out). Scripts can authenticate with a bearer token instead
+(`web.token` / `TRADING_BOT_WEB_TOKEN`, `Authorization: Bearer <token>`).
+
+To reach the UI from other machines set `web.host` (e.g. `0.0.0.0`) and put a
+TLS-terminating reverse proxy in front of it for anything but a private
+network (the session cookie is only marked `Secure` when served over HTTPS).
 
 ### API key
+
+The app starts and is fully usable without a key: the first-run page lets you
+pick the data provider and (optionally) enter its key, and the dashboard shows
+a banner with *Enter API key* / *Use demo data* until a key is configured.
+Everything entered under *Settings* is applied immediately — no restart.
 
 1. Get a free key from [Alpha Vantage](https://www.alphavantage.co/support/#api-key)
    (25 requests/day, 5/minute) or [Twelve Data](https://twelvedata.com/pricing)
    (800 requests/day, 8/minute — a much better fit for intraday scanning).
-2. Provide it through the environment (preferred, never ends up in git):
+2. Enter it on the setup page or under *Settings → Market data*, or provide it
+   through the environment (never ends up in git):
    ```bash
    export TRADING_BOT_API_KEY=your_key
    ```
-   or put it in `config.json` under `data.api_key`, or enter it in *Settings*.
+   or put it in `config.json` under `data.api_key`.
 
 > **Budget reality check.** Free tiers are small, so the engine *paces* requests:
 > the daily budget is spread evenly over the trading session (09:30–16:00
@@ -117,6 +143,7 @@ application can be explored offline (and the test-suite runs against it).
 | `trading-bot scan` | One scan, print new signals as JSON, exit |
 | `trading-bot backtest AAPL [--strategy NAME] [--bars 1000]` | Backtest strategies on one symbol |
 | `trading-bot check` | Validate config and strategies |
+| `trading-bot set-password [--username U] [--password P]` | Set the web login (hashed into the config file) |
 | `--config path` | Use another config file (default `config.json`) |
 
 Use `python -m trading_bot …` if the console script is not on your `PATH`.
@@ -145,16 +172,19 @@ Use `python -m trading_bot …` if the console script is not on your `PATH`.
 * **Positions** – paper-broker account, open positions with P&L, stops and
   targets, fills; reset button.
 * **Settings** – provider, API key, interval, budget, market hours,
-  notifications, trading. Provider / API key changes need a server restart.
+  notifications, trading, account credentials. Changes are applied live;
+  provider / key / budget changes rebuild the data connection on the spot.
 
 ### HTTP API
 
 Everything the UI does is available at `/api/*` (interactive docs at
 `/api/docs`): status and engine control, watchlist, bars and overlays,
 strategies (validate / save / enable / delete), backtests, signals, positions,
-settings. `/ws` streams events (`bars`, `signal`, `scan`, `fetch_failed`,
-`engine`, `positions`, `status`) as JSON. With a token configured, send
-`Authorization: Bearer <token>` (or `?token=` for the WebSocket).
+settings, plus `/api/auth/*` (status, setup, login, logout, password). `/ws`
+streams events (`bars`, `signal`, `scan`, `fetch_failed`, `engine`,
+`positions`, `status`) as JSON. Requests are authenticated by the session
+cookie or, for scripts, `Authorization: Bearer <token>` (`?token=` for the
+WebSocket).
 
 ## Writing strategies
 
@@ -239,7 +269,12 @@ signal is never notified twice, even across restarts.
   "strategies_file": "strategies.json",
   "plugins_dir": "strategies",     // Python plugin strategies
   "log_level": "INFO",
-  "web": {"host": "127.0.0.1", "port": 8080, "token": "", "open_browser": true},
+  "web": {                         // web server + login
+    "host": "127.0.0.1", "port": 8080, "open_browser": true,
+    "username": "admin", "password_hash": "",   // set via the setup page or `trading-bot set-password`
+    "token": "",                   // optional bearer token for scripts (or TRADING_BOT_WEB_TOKEN)
+    "session_hours": 12
+  },
   "data": {
     "provider": "alphavantage",    // alphavantage | twelvedata | csv | demo
     "api_key": "",                 // or TRADING_BOT_API_KEY
@@ -297,8 +332,9 @@ trading_bot/
   web/
     server.py        FastAPI app: REST API, WebSocket broadcaster, static files
     charting.py      chart payloads (bars, overlays grouped into panes, markers)
-    static/          Material Design single-page app (index.html, css/material.css,
-                     js/app.js, js/chart.js, js/ui.js) - no build step
+    auth.py          PBKDF2 password hashing, session store, login throttling
+    static/          Material Design single-page app (index.html, login.html, css/material.css,
+                     js/app.js, js/chart.js, js/ui.js, js/login.js) - no build step
 ```
 
 The engine runs on background threads and publishes events on an `EventBus`;
@@ -321,8 +357,8 @@ uv run mypy tests trading_bot # type check (tests are fully annotated and checke
 | --- | --- | --- |
 | Unit | `tests/test_indicators.py`, `test_expression.py`, `test_strategy.py`, `test_backtest.py`, `test_broker_storage.py`, `test_notify_config.py`, `test_data_service.py`, `test_providers.py` | Pure logic; providers use recorded API payloads and a fake HTTP session |
 | Integration | `tests/test_engine.py`, `tests/test_cli.py` | Scan loop, pacing, market hours, paper trading, CLI commands incl. `serve` |
-| API | `tests/test_web_api.py` | Every REST endpoint, token auth and the WebSocket (FastAPI `TestClient`, no browser) |
-| End-to-end | `tests/test_web_e2e.py` | Playwright + headless Chromium against a live server: layout/MD tokens, chart pixels, zoom/pan, watchlist, engine & notifications, editor, backtest dialog, settings, error states, token dialog |
+| API | `tests/test_web_api.py`, `tests/test_web_auth.py` | Every REST endpoint, login/session/setup/throttling, bearer token and the WebSocket (FastAPI `TestClient`, no browser) |
+| End-to-end | `tests/test_web_e2e.py` | Playwright + headless Chromium against a live server: login and first-run setup pages, layout/MD tokens, chart pixels, zoom/pan, watchlist, engine & notifications, editor, backtest dialog, settings, credential change, error states |
 
 Browser tests need a Chromium for Playwright: `uv run playwright install chromium`
 (they are skipped with a message if it is missing). All widgets used by the

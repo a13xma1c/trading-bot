@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Sign in · Trading Bot</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap">
+  <link rel="stylesheet" href="/static/css/material.css">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='6' fill='%231d4a8f'/%3E%3Cpath fill='%23d6e3ff' d='M3.5 18.49l6-6.01 4 4L22 6.92l-1.41-1.41-7.09 7.97-4-4L2 16.99z'/%3E%3C/svg%3E">
+</head>
+<body class="login-body">
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-chart" viewBox="0 0 24 24"><path d="M3.5 18.49l6-6.01 4 4L22 6.92l-1.41-1.41-7.09 7.97-4-4L2 16.99z"/></symbol>
+    <symbol id="i-arrow-down" viewBox="0 0 24 24"><path d="M7 10l5 5 5-5z"/></symbol>
+    <symbol id="i-login" viewBox="0 0 24 24"><path d="M11 7 9.6 8.4l2.6 2.6H2v2h10.2l-2.6 2.6L11 17l5-5-5-5zm9 12h-8v2h8c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2h-8v2h8v14z"/></symbol>
+  </defs>
+</svg>
+
+<main class="login-layout">
+  <div class="card elevated login-card" id="loginCard">
+    <div class="login-brand">
+      <div class="brand"><svg class="icon"><use href="#i-chart"/></svg></div>
+      <div>
+        <h1 class="headline-small" style="margin:0">Trading Bot</h1>
+        <div class="body-medium muted" id="loginSubtitle">Sign in to continue</div>
+      </div>
+    </div>
+
+    <form class="stack" id="loginForm" autocomplete="on">
+      <div class="text-field"><div class="field"><input id="usernameInput" name="username" placeholder=" " autocomplete="username" required autofocus><label for="usernameInput">Username</label></div></div>
+      <div class="text-field"><div class="field"><input id="passwordInput" name="password" type="password" placeholder=" " autocomplete="current-password" required><label for="passwordInput">Password</label></div></div>
+      <div class="text-field hidden" id="confirmField"><div class="field"><input id="confirmInput" name="confirm" type="password" placeholder=" " autocomplete="new-password"><label for="confirmInput">Confirm password</label></div><div class="supporting">At least 8 characters</div></div>
+      <div class="hidden stack" id="setupDataFields">
+        <div class="divider"></div>
+        <div class="title-small">Market data (optional)</div>
+        <div class="text-field"><div class="field"><select id="providerSelect"></select><label for="providerSelect">Provider</label><svg class="icon select-arrow"><use href="#i-arrow-down"/></svg></div><div class="supporting" id="providerNote"></div></div>
+        <div class="text-field" id="apiKeyField"><div class="field"><input id="apiKeyInput" name="api_key" type="password" placeholder=" " autocomplete="off"><label for="apiKeyInput">API key</label></div><div class="supporting">Optional now - you can add it later under Settings. Demo data needs no key.</div></div>
+      </div>
+      <div class="body-medium error-text" id="loginError" role="alert" aria-live="assertive"></div>
+      <button type="submit" class="btn filled login-submit" id="loginButton"><svg class="icon"><use href="#i-login"/></svg><span id="loginButtonLabel">Sign in</span></button>
+    </form>
+    <div class="body-small muted" id="loginHint"></div>
+  </div>
+</main>
+
+<script type="module" src="/static/js/login.js"></script>
+</body>
+</html>

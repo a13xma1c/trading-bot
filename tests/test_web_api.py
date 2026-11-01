@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -17,23 +16,22 @@ from trading_bot.engine import TradingEngine
 from trading_bot.web.server import create_app
 
 from .conftest import TwelveDataSession
+from .web_helpers import TEST_PASSWORD, TEST_USER, write_project
 
 
 def make_config(tmp_path: Path, **overrides: Any) -> Path:
-    raw: dict[str, Any] = {
-        "watchlist": ["AAPL", "MSFT"], "scan_interval": 5, "data_dir": "bot_data", "strategies_file": "strategies.json",
-        "data": {"provider": "demo", "interval": "5min", "bars": 200}, "market_hours": {"enabled": False},
-        "trading": {"trading_enabled": True, "initial_cash": 50_000},
-    }
-    raw.update(overrides)
-    path = tmp_path / "config.json"
-    path.write_text(json.dumps(raw))
-    (tmp_path / "strategies.json").write_text(json.dumps([
+    strategies: list[dict[str, Any]] = [
         {"name": "MA Crossover", "buy_rule": "crossover(sma(fast), sma(slow))", "sell_rule": "crossunder(sma(fast), sma(slow))",
          "params": {"fast": 5, "slow": 20}, "description": "classic"},
         {"name": "Always Buy", "buy_rule": "close > 0"},
-    ]))
-    return path
+    ]
+    overrides.setdefault("scan_interval", 5)
+    return write_project(tmp_path, strategies=strategies, **overrides)
+
+
+def sign_in(client: TestClient, username: str = TEST_USER, password: str = TEST_PASSWORD) -> None:
+    response = client.post("/api/auth/login", json={"username": username, "password": password})
+    assert response.status_code == 200, response.text
 
 
 @pytest.fixture
@@ -41,6 +39,7 @@ def web(tmp_path: Path) -> Iterator[tuple[TestClient, TradingEngine, Path]]:
     config_path = make_config(tmp_path)
     engine = build_engine(AppConfig.load(config_path))
     with TestClient(create_app(engine, str(config_path))) as client:
+        sign_in(client)
         yield client, engine, config_path
     engine.close()
 
@@ -52,6 +51,7 @@ def test_index_and_static_and_health(web: tuple[TestClient, TradingEngine, Path]
     client, _, _ = web
     page = client.get("/")
     assert page.status_code == 200 and "<title>Trading Bot</title>" in page.text
+    assert 'id="logoutButton"' in page.text
     assert 'id="startButton"' in page.text and 'id="chartCanvas"' in page.text
     assert client.get("/static/css/material.css").status_code == 200
     assert "--md-sys-color-primary" in client.get("/static/css/material.css").text
@@ -72,35 +72,165 @@ def test_status_and_engine_lifecycle(web: tuple[TestClient, TradingEngine, Path]
     assert not engine.running
 
 
-def test_start_requires_api_key(tmp_path: Path) -> None:
+def test_app_works_without_api_key_and_key_can_be_added_live(tmp_path: Path) -> None:
+    """The shipped config (alphavantage, no key) must start; the key/provider is set from the UI."""
     config_path = make_config(tmp_path, data={"provider": "alphavantage", "api_key": ""})
-    engine = build_engine(AppConfig.load(config_path), provider=TwelveDataProvider("k", session=TwelveDataSession()))
+    engine = build_engine(AppConfig.load(config_path))  # no crash without a key
     try:
-        with TestClient(create_app(engine)) as client:
+        with TestClient(create_app(engine, str(config_path))) as client:
+            sign_in(client)
+            status = client.get("/api/status").json()
+            assert status["requires_api_key"] is True and status["api_key_set"] is False
             response = client.post("/api/engine/start")
             assert response.status_code == 409 and "API key" in response.json()["detail"]
-            assert client.get("/api/status").json()["requires_api_key"] is True
+            bars = client.get("/api/bars/AAPL")
+            assert bars.status_code == 503 and "requires an API key" in bars.json()["detail"]
+            assert "requires an API key" in client.get("/api/watchlist").json()[0]["error"]
+
+            # One click: switch to demo data, applied immediately.
+            switched = client.post("/api/settings/provider", json={"provider": "demo"})
+            assert switched.status_code == 200 and switched.json()["status"]["requires_api_key"] is False
+            assert engine.wait_for_workers(10.0)
+            assert len(client.get("/api/bars/AAPL").json()["bars"]) == 200
+            assert client.get("/api/watchlist").json()[0]["error"] is None
+            assert AppConfig.load(config_path).data.provider == "demo"
+
+            # Entering a key for a real provider in Settings is applied without restart.
+            saved = client.put("/api/settings", json={"data": {"provider": "twelvedata", "api_key": "abc123"}})
+            assert saved.status_code == 200 and saved.json()["data_reconfigured"] is True
+            assert saved.json()["status"]["provider"] == "twelvedata" and saved.json()["status"]["api_key_set"] is True
+            assert engine.data.provider.name == "twelvedata"
+            assert engine.config.data.api_key == "abc123"
+            assert client.post("/api/settings/provider", json={"provider": "bloomberg"}).status_code == 422
     finally:
         engine.close()
 
 
-def test_token_protection(tmp_path: Path) -> None:
+def test_api_token_for_scripted_access(tmp_path: Path) -> None:
+    """Scripts can use the bearer token instead of a browser session."""
     config_path = make_config(tmp_path, web={"token": "s3cret"})
     engine = build_engine(AppConfig.load(config_path))
     try:
         with TestClient(create_app(engine, str(config_path))) as client:
-            assert client.get("/").status_code == 200  # the page itself is public
             assert client.get("/api/status").status_code == 401
             assert client.get("/api/status", headers={"Authorization": "Bearer wrong"}).status_code == 401
             assert client.get("/api/status", headers={"Authorization": "Bearer s3cret"}).status_code == 200
             assert client.get("/api/status?token=s3cret").status_code == 200
-            with pytest.raises(Exception):  # noqa: B017 - WebSocket rejected with close code 4401
-                with client.websocket_connect("/ws"):
-                    pass
+            assert client.get("/api/auth/status", headers={"Authorization": "Bearer s3cret"}).json()["username"] == "api-token"
             with client.websocket_connect("/ws?token=s3cret") as ws:
                 assert ws.receive_json()["type"] == "hello"
     finally:
         engine.close()
+
+
+# -------------------------------------------------------------------- auth
+
+
+def test_login_required_and_session_flow(tmp_path: Path) -> None:
+    config_path = make_config(tmp_path)
+    engine = build_engine(AppConfig.load(config_path))
+    try:
+        with TestClient(create_app(engine, str(config_path))) as client:
+            # Anonymous: the app redirects to the login page and the API refuses.
+            assert client.get("/", follow_redirects=False).status_code == 302
+            assert client.get("/", follow_redirects=False).headers["location"] == "/login"
+            login_page = client.get("/login")
+            assert login_page.status_code == 200 and 'id="loginForm"' in login_page.text
+            assert client.get("/api/status").status_code == 401
+            assert client.post("/api/engine/start").status_code == 401
+            status = client.get("/api/auth/status").json()
+            assert status["authenticated"] is False and status["username"] is None
+            assert status["setup_required"] is False and status["configured_username"] == TEST_USER
+            with pytest.raises(Exception):  # noqa: B017 - WebSocket closed with 4401
+                with client.websocket_connect("/ws"):
+                    pass
+
+            # Wrong credentials.
+            bad = client.post("/api/auth/login", json={"username": TEST_USER, "password": "nope"})
+            assert bad.status_code == 401 and "Invalid" in bad.json()["detail"]
+            assert client.post("/api/auth/login", json={"username": "someone", "password": TEST_PASSWORD}).status_code == 401
+            assert client.post("/api/auth/setup", json={"username": "x", "password": "whatever123"}).status_code == 409
+
+            # Login sets an HttpOnly session cookie; everything works afterwards.
+            ok = client.post("/api/auth/login", json={"username": TEST_USER, "password": TEST_PASSWORD})
+            assert ok.status_code == 200 and ok.json() == {"authenticated": True, "username": TEST_USER}
+            cookie = ok.headers["set-cookie"]
+            assert "tb_session=" in cookie and "HttpOnly" in cookie and "SameSite=lax" in cookie.lower().replace("samesite=lax", "SameSite=lax")
+            assert client.get("/api/status").status_code == 200
+            assert client.get("/api/auth/status").json()["username"] == TEST_USER
+            assert client.get("/", follow_redirects=False).status_code == 200
+            assert client.get("/login", follow_redirects=False).status_code == 302  # already signed in
+            with client.websocket_connect("/ws") as ws:
+                assert ws.receive_json()["type"] == "hello"
+
+            # Logout revokes the session.
+            assert client.post("/api/auth/logout").json() == {"authenticated": False}
+            assert client.get("/api/status").status_code == 401
+    finally:
+        engine.close()
+
+
+def test_login_throttling(tmp_path: Path) -> None:
+    config_path = make_config(tmp_path)
+    engine = build_engine(AppConfig.load(config_path))
+    try:
+        with TestClient(create_app(engine, str(config_path))) as client:
+            for _ in range(4):
+                assert client.post("/api/auth/login", json={"username": TEST_USER, "password": "bad"}).status_code == 401
+            locked = client.post("/api/auth/login", json={"username": TEST_USER, "password": "bad"})
+            assert locked.status_code == 429 and "Retry-After" in locked.headers
+            # Even the right password is refused while locked out.
+            assert client.post("/api/auth/login", json={"username": TEST_USER, "password": TEST_PASSWORD}).status_code == 429
+    finally:
+        engine.close()
+
+
+def test_first_run_setup(tmp_path: Path) -> None:
+    config_path = make_config(tmp_path, login=False)
+    engine = build_engine(AppConfig.load(config_path))
+    try:
+        with TestClient(create_app(engine, str(config_path))) as client:
+            assert client.get("/api/auth/status").json()["setup_required"] is True
+            assert client.post("/api/auth/login", json={"username": "admin", "password": "x"}).status_code == 409
+            weak = client.post("/api/auth/setup", json={"username": "owner", "password": "short"})
+            assert weak.status_code == 422 and "8 characters" in weak.json()["detail"]
+            status = client.get("/api/auth/status").json()
+            assert [p["name"] for p in status["providers"]] == ["alphavantage", "twelvedata", "csv", "demo"]
+            assert client.post("/api/auth/setup", json={"username": "o", "password": "long enough password",
+                                                        "provider": "nope"}).status_code == 422
+            created = client.post("/api/auth/setup", json={"username": "owner", "password": "long enough password",
+                                                           "provider": "twelvedata", "api_key": "key-from-setup"})
+            assert created.status_code == 201 and created.json()["username"] == "owner"
+            assert created.json()["status"]["provider"] == "twelvedata" and created.json()["status"]["api_key_set"]
+            assert client.get("/api/status").status_code == 200  # signed in right away
+            saved = AppConfig.load(config_path)
+            assert saved.web.username == "owner" and saved.web.password_hash.startswith("pbkdf2_sha256$")
+            assert saved.data.provider == "twelvedata" and saved.data.api_key == "key-from-setup"
+            assert engine.data.provider.name == "twelvedata"
+            assert "long enough password" not in config_path.read_text()
+            # Setup is one-shot.
+            assert client.post("/api/auth/setup", json={"username": "x", "password": "another password"}).status_code == 409
+            with TestClient(create_app(engine, str(config_path))) as fresh:
+                assert fresh.post("/api/auth/login", json={"username": "owner", "password": "long enough password"}).status_code == 200
+    finally:
+        engine.close()
+
+
+def test_change_password(web: tuple[TestClient, TradingEngine, Path]) -> None:
+    client, engine, config_path = web
+    wrong = client.post("/api/auth/password", json={"current_password": "nope", "new_password": "new password 1"})
+    assert wrong.status_code == 401
+    weak = client.post("/api/auth/password", json={"current_password": TEST_PASSWORD, "new_password": "short"})
+    assert weak.status_code == 422
+    changed = client.post("/api/auth/password", json={"current_password": TEST_PASSWORD, "new_password": "new password 1",
+                                                      "username": "trader"})
+    assert changed.status_code == 200 and changed.json()["username"] == "trader"
+    assert client.get("/api/status").status_code == 200  # the caller keeps a fresh session
+    assert AppConfig.load(config_path).web.username == "trader"
+    assert client.get("/api/settings").json()["web"]["password_hash"] == ""  # never exposed
+    with TestClient(create_app(engine, str(config_path))) as fresh:
+        assert fresh.post("/api/auth/login", json={"username": "trader", "password": TEST_PASSWORD}).status_code == 401
+        assert fresh.post("/api/auth/login", json={"username": "trader", "password": "new password 1"}).status_code == 200
 
 
 # --------------------------------------------------------------- watchlist
@@ -139,12 +269,13 @@ def test_fetch_errors_are_reported(tmp_path: Path) -> None:
     engine = build_engine(AppConfig.load(config_path), provider=TwelveDataProvider("k", session=session))
     try:
         with TestClient(create_app(engine)) as client:
+            sign_in(client)
             response = client.get("/api/bars/AAPL")
             assert response.status_code == 503 and "apikey" in response.json()["detail"]
             assert client.get("/api/watchlist").json()[0]["error"]
             assert client.get("/api/status").json()["errors_by_symbol"]["AAPL"]
             session.mode = "ok"
-            assert len(client.get("/api/bars/AAPL").json()["bars"]) == 300
+            assert len(client.get("/api/bars/AAPL").json()["bars"]) == 200
             assert client.get("/api/watchlist").json()[0]["error"] is None
     finally:
         engine.close()
@@ -266,7 +397,7 @@ def test_settings_roundtrip(web: tuple[TestClient, TradingEngine, Path]) -> None
     })
     assert response.status_code == 200
     body = response.json()
-    assert body["restart_required"] is True  # API key changed
+    assert body["data_reconfigured"] is True  # API key / bars changed -> data service rebuilt live
     assert engine.config.scan_interval == 120 and engine.config.data.bars == 250 and engine.config.data.closed_bars_only
     assert engine.config.market_hours.timezone == "Europe/London" and engine.config.trading.position_size_pct == 0.25
     assert engine.config.notifications.webhook_url == "https://hooks.example/x"
@@ -276,7 +407,7 @@ def test_settings_roundtrip(web: tuple[TestClient, TradingEngine, Path]) -> None
     assert client.get("/api/settings").json()["data"]["api_key_set"] is True
 
     # Blank key keeps the stored one; invalid values are rejected with details.
-    assert client.put("/api/settings", json={"data": {"api_key": ""}}).json()["restart_required"] is False
+    assert client.put("/api/settings", json={"data": {"api_key": ""}}).json()["data_reconfigured"] is False
     assert AppConfig.load(config_path).data.api_key == "new-key"
     bad = client.put("/api/settings", json={"market_hours": {"timezone": "Mars/Olympus"}})
     assert bad.status_code == 422 and "time zone" in bad.json()["detail"]

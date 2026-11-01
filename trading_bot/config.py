@@ -7,7 +7,8 @@ have to be committed to version control:
 * ``TRADING_BOT_API_KEY`` - overrides ``data.api_key``
 * ``TRADING_BOT_WEBHOOK_URL`` - overrides ``notifications.webhook_url``
 * ``TRADING_BOT_SMTP_PASSWORD`` - overrides ``notifications.email.password``
-* ``TRADING_BOT_WEB_TOKEN`` - overrides ``web.token`` (API token of the web UI)
+* ``TRADING_BOT_WEB_TOKEN`` - overrides ``web.token`` (API token for scripted access)
+* ``TRADING_BOT_WEB_PASSWORD`` - plain-text login password (hashed in memory; handy for containers)
 
 The loader also understands the legacy flat layout used by the first version of
 this project (``api_key``, ``scan_interval``, ``rsi_period`` ...) and migrates
@@ -123,11 +124,20 @@ class NotificationConfig:
 
 @dataclass
 class WebConfig:
-    """Settings of the built-in web server."""
+    """Settings of the built-in web server.
+
+    The UI requires a login.  The password is stored as a PBKDF2 hash
+    (``trading-bot set-password``); until one is configured the web UI shows a
+    first-run setup page.  ``token`` is an optional bearer token for scripted
+    API access.
+    """
 
     host: str = "127.0.0.1"   # bind to localhost only unless you know what you are doing
     port: int = 8080
+    username: str = "admin"
+    password_hash: str = ""   # set with `trading-bot set-password` (or TRADING_BOT_WEB_PASSWORD)
     token: str = ""           # optional API token (or TRADING_BOT_WEB_TOKEN)
+    session_hours: float = 12.0
     open_browser: bool = True
 
 
@@ -243,6 +253,10 @@ class AppConfig:
             self.notifications.email.password = pw
         if token := os.environ.get("TRADING_BOT_WEB_TOKEN"):
             self.web.token = token
+        if password := os.environ.get("TRADING_BOT_WEB_PASSWORD"):
+            from .web.auth import hash_password
+
+            self.web.password_hash = hash_password(password)
 
     def validate(self) -> None:
         if self.scan_interval < 1:
@@ -264,6 +278,10 @@ class AppConfig:
         self.market_hours.validate()
         if not 0 < self.web.port < 65536:
             raise ConfigError("web.port must be between 1 and 65535")
+        if not self.web.username.strip():
+            raise ConfigError("web.username must not be empty")
+        if self.web.session_hours <= 0:
+            raise ConfigError("web.session_hours must be positive")
         for sym in self.watchlist:
             if not sym.replace(".", "").replace("-", "").isalnum():
                 raise ConfigError(f"Invalid symbol in watchlist: {sym!r}")

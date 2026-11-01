@@ -21,8 +21,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import Depends, FastAPI, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.requests import Request
@@ -45,10 +45,12 @@ from ..engine import (
 )
 from ..notify import WebhookChannel
 from ..strategy import RuleStrategy, Signal, Strategy, StrategyDefinition, function_help
+from .auth import LoginThrottle, SessionStore, hash_password, validate_password_strength, verify_password
 from .charting import bars_payload, marker_indices, overlay_payload
 
 logger = logging.getLogger(__name__)
 STATIC_DIR = Path(__file__).parent / "static"
+SESSION_COOKIE = "tb_session"
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +176,7 @@ def status_payload(engine: TradingEngine) -> dict[str, Any]:
         "last_error": engine.stats.last_error,
         "errors_by_symbol": engine.snapshot()["errors_by_symbol"],
         "requires_api_key": cfg.requires_api_key() and not cfg.data.api_key,
+        "api_key_set": bool(cfg.data.api_key),
     }
 
 
@@ -273,6 +276,27 @@ class BacktestBody(BaseModel):
     commission: float = Field(default=0.0, ge=0)
 
 
+class LoginBody(BaseModel):
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=1, max_length=256)
+
+
+class SetupBody(LoginBody):
+    provider: str | None = None   # optional: choose the market-data source during account creation
+    api_key: str | None = None    # optional: API key for that provider (can be added later in Settings)
+
+
+class PasswordChangeBody(BaseModel):
+    current_password: str = Field(min_length=1, max_length=256)
+    new_password: str = Field(min_length=1, max_length=256)
+    username: str | None = Field(default=None, max_length=64)
+
+
+class ProviderBody(BaseModel):
+    provider: str
+    api_key: str | None = None
+
+
 class SettingsBody(BaseModel):
     scan_interval: int | None = None
     data: dict[str, Any] | None = None
@@ -286,10 +310,13 @@ class SettingsBody(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def create_app(engine: TradingEngine, config_path: str | None = None, token: str | None = None) -> FastAPI:
+def create_app(engine: TradingEngine, config_path: str | None = None, token: str | None = None,
+               sessions: SessionStore | None = None, throttle: LoginThrottle | None = None) -> FastAPI:
     config: AppConfig = engine.config
     api_token = token if token is not None else config.web.token
     broadcaster = Broadcaster(engine)
+    sessions = sessions or SessionStore(config.web.session_hours * 3600)
+    throttle = throttle or LoginThrottle()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -303,18 +330,127 @@ def create_app(engine: TradingEngine, config_path: str | None = None, token: str
                   openapi_url="/api/openapi.json", redoc_url=None)
     app.state.engine = engine
     app.state.broadcaster = broadcaster
+    app.state.sessions = sessions
 
     # ------------------------------------------------------------- auth
-    def _check_token(provided: str | None) -> None:
-        if api_token and not (provided and secrets.compare_digest(provided, api_token)):
-            raise HTTPException(status_code=401, detail="Invalid or missing API token")
+    def _setup_required() -> bool:
+        return not config.web.password_hash
 
-    async def require_token(request: Request) -> None:
+    def _token_ok(provided: str | None) -> bool:
+        return bool(api_token and provided and secrets.compare_digest(provided, api_token))
+
+    def _bearer(request: Request) -> str | None:
         header = request.headers.get("authorization", "")
-        provided = header[7:] if header.lower().startswith("bearer ") else request.query_params.get("token")
-        _check_token(provided)
+        return header[7:] if header.lower().startswith("bearer ") else request.query_params.get("token")
 
-    auth: list[Any] = [Depends(require_token)]
+    def _authenticated(request: Request) -> str | None:
+        """Username of the caller, or None.  Accepts a session cookie or the API bearer token."""
+        session = sessions.get(request.cookies.get(SESSION_COOKIE))
+        if session is not None:
+            return session.username
+        if _token_ok(_bearer(request)):
+            return "api-token"
+        return None
+
+    async def require_auth(request: Request) -> str:
+        user = _authenticated(request)
+        if user is None:
+            raise HTTPException(status_code=401, detail="Authentication required")
+        return user
+
+    def _client_key(request: Request) -> str:
+        return request.client.host if request.client else "unknown"
+
+    def _set_session_cookie(response: Response, request: Request, token: str) -> None:
+        response.set_cookie(SESSION_COOKIE, token, max_age=int(config.web.session_hours * 3600), httponly=True,
+                            samesite="lax", secure=request.url.scheme == "https", path="/")
+
+    auth: list[Any] = [Depends(require_auth)]
+
+    def _provider_options() -> dict[str, Any]:
+        return {"providers": [{"name": name, "requires_api_key": name in ("alphavantage", "twelvedata"),
+                               "per_minute": budget[0], "per_day": budget[1]}
+                              for name, budget in PROVIDER_BUDGETS.items()],
+                "provider": config.data.provider, "api_key_set": bool(config.data.api_key)}
+
+    @app.get("/api/auth/status")
+    def auth_status(request: Request) -> dict[str, Any]:
+        user = _authenticated(request)
+        return {"authenticated": user is not None, "username": user, "setup_required": _setup_required(),
+                "configured_username": config.web.username, **_provider_options()}
+
+    @app.post("/api/auth/setup", status_code=201)
+    def auth_setup(body: SetupBody, request: Request, response: Response) -> dict[str, Any]:
+        """First run only: create the administrator credentials."""
+        if not _setup_required():
+            raise HTTPException(status_code=409, detail="A password is already configured")
+        problem = validate_password_strength(body.password)
+        if problem:
+            raise HTTPException(status_code=422, detail=problem)
+        if body.provider is not None and body.provider not in PROVIDER_BUDGETS:
+            raise HTTPException(status_code=422, detail=f"Unknown provider {body.provider!r}")
+        config.web.username = body.username.strip()
+        config.web.password_hash = hash_password(body.password)
+        data_changed = False
+        if body.provider is not None and body.provider != config.data.provider:
+            config.data.provider = body.provider
+            data_changed = True
+        if body.api_key is not None and body.api_key.strip() and body.api_key.strip() != config.data.api_key:
+            config.data.api_key = body.api_key.strip()
+            data_changed = True
+        _save_config()
+        if data_changed:
+            _apply_data_settings()
+        session = sessions.create(config.web.username)
+        _set_session_cookie(response, request, session.token)
+        logger.info("Administrator account %r created (provider %s)", config.web.username, config.data.provider)
+        return {"authenticated": True, "username": session.username, "status": status_payload(engine)}
+
+    @app.post("/api/auth/login")
+    def auth_login(body: LoginBody, request: Request, response: Response) -> dict[str, Any]:
+        if _setup_required():
+            raise HTTPException(status_code=409, detail="No password configured yet; complete the setup first")
+        key = _client_key(request)
+        wait = throttle.retry_after(key)
+        if wait > 0:
+            raise HTTPException(status_code=429, detail=f"Too many failed attempts; try again in {int(wait) + 1}s",
+                                headers={"Retry-After": str(int(wait) + 1)})
+        ok = secrets.compare_digest(body.username.strip(), config.web.username) and \
+            verify_password(body.password, config.web.password_hash)
+        if not ok:
+            locked = throttle.record_failure(key)
+            logger.warning("Failed login for %r from %s", body.username, key)
+            if locked:
+                raise HTTPException(status_code=429, detail=f"Too many failed attempts; try again in {int(locked)}s",
+                                    headers={"Retry-After": str(int(locked))})
+            raise HTTPException(status_code=401, detail="Invalid username or password")
+        throttle.record_success(key)
+        session = sessions.create(config.web.username)
+        _set_session_cookie(response, request, session.token)
+        logger.info("User %r logged in from %s", session.username, key)
+        return {"authenticated": True, "username": session.username}
+
+    @app.post("/api/auth/logout")
+    def auth_logout(request: Request, response: Response) -> dict[str, Any]:
+        sessions.revoke(request.cookies.get(SESSION_COOKIE))
+        response.delete_cookie(SESSION_COOKIE, path="/")
+        return {"authenticated": False}
+
+    @app.post("/api/auth/password", dependencies=auth)
+    def auth_change_password(body: PasswordChangeBody, request: Request, response: Response) -> dict[str, Any]:
+        if not verify_password(body.current_password, config.web.password_hash):
+            raise HTTPException(status_code=401, detail="Current password is incorrect")
+        problem = validate_password_strength(body.new_password)
+        if problem:
+            raise HTTPException(status_code=422, detail=problem)
+        if body.username and body.username.strip():
+            config.web.username = body.username.strip()
+        config.web.password_hash = hash_password(body.new_password)
+        _save_config()
+        sessions.revoke_all()  # every other session must log in again
+        session = sessions.create(config.web.username)
+        _set_session_cookie(response, request, session.token)
+        return {"ok": True, "username": config.web.username}
 
     def _bars_for(symbol: str) -> Any:
         result = engine.latest_bars(symbol) or engine.data.cached_bars(symbol, config.data.interval)
@@ -329,6 +465,15 @@ def create_app(engine: TradingEngine, config_path: str | None = None, token: str
     def _save_config() -> None:
         if config_path:
             config.save(config_path)
+
+    def _apply_data_settings() -> None:
+        """Hot-swap the market-data service after provider / key / budget changes (no restart)."""
+        try:
+            engine.reconfigure_data()
+        except ProviderError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        for symbol in engine.watchlist:
+            engine.fetch_in_background(symbol)
 
     # ----------------------------------------------------------- status
     @app.get("/api/status", dependencies=auth)
@@ -542,6 +687,7 @@ def create_app(engine: TradingEngine, config_path: str | None = None, token: str
         data["data"]["api_key"] = ""  # never hand the key back to the browser
         data["notifications"]["email"]["password"] = ""
         data["web"]["token"] = ""
+        data["web"]["password_hash"] = ""
         data["options"] = {"providers": list(PROVIDER_BUDGETS), "intervals": list(VALID_INTERVALS),
                            "budgets": {k: {"per_minute": v[0], "per_day": v[1]} for k, v in PROVIDER_BUDGETS.items()}}
         data["config_path"] = config_path
@@ -566,7 +712,8 @@ def create_app(engine: TradingEngine, config_path: str | None = None, token: str
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         except (TypeError, ValueError) as exc:
             raise HTTPException(status_code=422, detail=f"Invalid settings: {exc}") from exc
-        provider_changed = updated.data.provider != config.data.provider or updated.data.api_key != config.data.api_key
+        data_fields = ("provider", "api_key", "requests_per_minute", "requests_per_day", "csv_directory", "interval")
+        data_changed = any(getattr(updated.data, f) != getattr(config.data, f) for f in data_fields)
         # Apply in place so the running engine sees the new values.
         config.scan_interval = updated.scan_interval
         config.data = updated.data
@@ -575,12 +722,27 @@ def create_app(engine: TradingEngine, config_path: str | None = None, token: str
         config.trading = updated.trading
         _save_config()
         _sync_webhook(engine)
-        return {"ok": True, "restart_required": provider_changed, "status": status_payload(engine)}
+        if data_changed:
+            _apply_data_settings()
+        return {"ok": True, "data_reconfigured": data_changed, "status": status_payload(engine)}
+
+    @app.post("/api/settings/provider", dependencies=auth)
+    def set_provider(body: ProviderBody) -> dict[str, Any]:
+        """Switch the market-data provider (e.g. to demo data) and optionally set its API key."""
+        if body.provider not in PROVIDER_BUDGETS:
+            raise HTTPException(status_code=422, detail=f"Unknown provider {body.provider!r}")
+        config.data.provider = body.provider
+        if body.api_key is not None and body.api_key.strip():
+            config.data.api_key = body.api_key.strip()
+        _save_config()
+        _apply_data_settings()
+        return {"ok": True, "status": status_payload(engine)}
 
     # --------------------------------------------------------- websocket
     @app.websocket("/ws")
     async def websocket_events(websocket: WebSocket, token: str | None = Query(default=None)) -> None:
-        if api_token and not (token and secrets.compare_digest(token, api_token)):
+        session = sessions.get(websocket.cookies.get(SESSION_COOKIE))
+        if session is None and not _token_ok(token):
             await websocket.close(code=4401)
             return
         await websocket.accept()
@@ -599,8 +761,16 @@ def create_app(engine: TradingEngine, config_path: str | None = None, token: str
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
     @app.get("/", include_in_schema=False)
-    def index() -> FileResponse:
+    def index(request: Request) -> Response:
+        if _authenticated(request) is None:
+            return RedirectResponse("/login", status_code=302)
         return FileResponse(STATIC_DIR / "index.html")
+
+    @app.get("/login", include_in_schema=False)
+    def login_page(request: Request) -> Response:
+        if _authenticated(request) is not None:
+            return RedirectResponse("/", status_code=302)
+        return FileResponse(STATIC_DIR / "login.html")
 
     @app.get("/api/health", include_in_schema=False)
     def health() -> JSONResponse:
@@ -653,10 +823,10 @@ def serve(engine: TradingEngine, config_path: str | None = None, host: str | Non
     if on_started:
         on_started(url)
     logger.info("Web UI available at %s", url)
-    if cfg.token:
-        logger.info("API token required (web.token / TRADING_BOT_WEB_TOKEN)")
-    elif host not in ("127.0.0.1", "localhost", "::1"):
-        logger.warning("The web UI is exposed on %s without an API token - set web.token", host)
+    if not cfg.password_hash:
+        logger.warning("No login password configured yet - open %s to create the administrator account", url)
+    if host not in ("127.0.0.1", "localhost", "::1") and not cfg.password_hash:
+        logger.warning("The web UI is exposed on %s without a password!", host)
     server.run()
     return 0
 

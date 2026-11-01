@@ -129,8 +129,8 @@ class _HttpProvider(MarketDataProvider):
     base_url: str = ""
 
     def __init__(self, api_key: str = "", session: HttpSession | None = None, timeout: float = DEFAULT_TIMEOUT):
-        if self.requires_api_key and not api_key:
-            raise AuthenticationError(f"{self.name} requires an API key (set data.api_key or TRADING_BOT_API_KEY)")
+        # A missing key is reported when a request is made (so the app can start and let the
+        # user enter the key in the UI), not at construction time.
         self.api_key = api_key
         self.timeout = timeout
         self.session: HttpSession
@@ -138,6 +138,9 @@ class _HttpProvider(MarketDataProvider):
         self.session.headers.setdefault("User-Agent", USER_AGENT)
 
     def _get_json(self, params: dict[str, Any], path: str = "") -> Any:
+        if self.requires_api_key and not self.api_key:
+            raise AuthenticationError(f"{self.name} requires an API key - enter it under Settings "
+                                      "(or set data.api_key / TRADING_BOT_API_KEY)")
         url = self.base_url + path
         try:
             resp = self.session.get(url, params=params, timeout=self.timeout)

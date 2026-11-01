@@ -24,9 +24,11 @@ from .conftest import FakeResponse, FakeSession, load_fixture
 
 # ---------------------------------------------------------------- Alpha Vantage
 
-def test_alphavantage_requires_key() -> None:
-    with pytest.raises(AuthenticationError):
-        AlphaVantageProvider("")
+def test_alphavantage_requires_key_at_request_time() -> None:
+    provider = AlphaVantageProvider("")  # construction must succeed so the app can start without a key
+    with pytest.raises(AuthenticationError, match="requires an API key"):
+        provider.get_bars("IBM")
+    assert create_provider("twelvedata", "").name == "twelvedata"
 
 
 def test_alphavantage_intraday_parsing() -> None:

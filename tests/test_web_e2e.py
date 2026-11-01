@@ -7,7 +7,6 @@ and the chart is verified by inspecting canvas pixels.
 
 from __future__ import annotations
 
-import json
 import re
 from collections.abc import Iterator
 from pathlib import Path
@@ -19,7 +18,7 @@ from trading_bot.config import AppConfig
 from trading_bot.data import DemoProvider, TwelveDataProvider
 
 from .conftest import TwelveDataSession
-from .web_helpers import LiveServer, start_live_server, write_project
+from .web_helpers import TEST_PASSWORD, TEST_USER, LiveServer, login, start_live_server, write_project
 
 pytest.importorskip("playwright")
 from playwright.sync_api import Browser, Page, expect  # noqa: E402
@@ -45,8 +44,7 @@ def page(browser: Browser, server: LiveServer) -> Iterator[Page]:
     errors: list[str] = []
     page.on("pageerror", lambda err: errors.append(str(err)))
     page.on("console", lambda msg: errors.append(msg.text) if msg.type == "error" and not any(k in msg.text for k in IGNORED_CONSOLE) else None)
-    page.goto(server.url)
-    page.wait_for_function("window.__app && window.__app.chart.bars.length > 0", timeout=15000)
+    login(page, server.url)
     yield page
     context.close()
     assert not errors, f"browser console errors: {errors}"
@@ -322,8 +320,7 @@ def test_provider_errors_are_visible(browser: Browser, tmp_path: Path) -> None:
     context = browser.new_context(viewport={"width": 1440, "height": 900})
     try:
         page = context.new_page()
-        page.goto(live.url)
-        page.wait_for_function("window.__app && window.__app.chart.bars.length === 200", timeout=15000)
+        login(page, live.url)
         session.mode = "auth"
         page.click("#refreshButton")
         expect(page.locator("#chartStatusLabel")).to_contain_text("ERROR", timeout=10000)
@@ -338,19 +335,140 @@ def test_provider_errors_are_visible(browser: Browser, tmp_path: Path) -> None:
         live.stop()
 
 
-def test_token_dialog(browser: Browser, tmp_path: Path) -> None:
-    config_path = write_project(tmp_path, web={"token": "open-sesame", "open_browser": False})
-    live = start_live_server(config_path)
+# ------------------------------------------------------------------ login
+
+
+def test_login_page_flow(browser: Browser, tmp_path: Path) -> None:
+    live = start_live_server(write_project(tmp_path))
     context = browser.new_context(viewport={"width": 1440, "height": 900})
     try:
         page = context.new_page()
         page.goto(live.url)
-        expect(page.locator("#tokenDialog")).to_be_visible()
-        page.fill("#tokenInput", "open-sesame")
-        page.click("#tokenOkButton")
+        page.wait_for_url("**/login")  # anonymous users land on the login page
+        expect(page).to_have_title(re.compile("Sign in"))
+        expect(page.locator("#loginSubtitle")).to_have_text("Sign in to continue")
+        expect(page.locator("#usernameInput")).to_have_value(TEST_USER)
+        expect(page.locator("#confirmField")).to_be_hidden()
+        assert page.evaluate("getComputedStyle(document.querySelector('#loginCard')).borderRadius") == "28px"  # MD3 extra-large shape
+
+        page.fill("#passwordInput", "wrong password")
+        page.click("#loginButton")
+        expect(page.locator("#loginError")).to_have_text("Invalid username or password")
+        assert "/login" in page.url
+
+        page.fill("#passwordInput", TEST_PASSWORD)
+        page.press("#passwordInput", "Enter")
+        page.wait_for_url(live.url)
         page.wait_for_function("window.__app && window.__app.chart.bars.length > 0", timeout=15000)
-        expect(page.locator("#engineStateText")).to_have_text("Engine stopped")
-        assert json.loads(page.evaluate("JSON.stringify(localStorage.getItem('trading-bot-token'))")) == "open-sesame"
+        expect(page.locator("#userName")).to_have_text(TEST_USER)
+        expect(page.locator("#userAvatar")).to_have_text("A")
+
+        # Visiting /login while signed in goes straight back to the app.
+        page.goto(live.url + "login")
+        page.wait_for_url(live.url)
+
+        # Logout returns to the login page and the session is gone.
+        page.click("#logoutButton")
+        page.wait_for_url("**/login")
+        page.goto(live.url)
+        page.wait_for_url("**/login")
+    finally:
+        context.close()
+        live.stop()
+
+
+def test_first_run_setup_page(browser: Browser, tmp_path: Path) -> None:
+    live = start_live_server(write_project(tmp_path, login=False))
+    context = browser.new_context(viewport={"width": 1440, "height": 900})
+    try:
+        page = context.new_page()
+        page.goto(live.url)
+        page.wait_for_url("**/login")
+        expect(page.locator("#loginSubtitle")).to_have_text("Create the administrator account")
+        expect(page.locator("#confirmField")).to_be_visible()
+        expect(page.locator("#loginButtonLabel")).to_have_text("Create account")
+        # Optional market-data section: the key field only shows for providers that need one.
+        expect(page.locator("#setupDataFields")).to_be_visible()
+        expect(page.locator("#providerSelect")).to_have_value("demo")
+        expect(page.locator("#apiKeyField")).to_be_hidden()
+        page.select_option("#providerSelect", "alphavantage")
+        expect(page.locator("#apiKeyField")).to_be_visible()
+        expect(page.locator("#providerNote")).to_contain_text("25/day")
+        page.select_option("#providerSelect", "demo")
+        page.fill("#usernameInput", "owner")
+        page.fill("#passwordInput", "first run password")
+        page.fill("#confirmInput", "different")
+        page.click("#loginButton")
+        expect(page.locator("#loginError")).to_have_text("Passwords do not match")
+        page.fill("#confirmInput", "first run password")
+        page.click("#loginButton")
+        page.wait_for_url(live.url)
+        page.wait_for_function("window.__app && window.__app.chart.bars.length > 0", timeout=15000)
+        expect(page.locator("#userName")).to_have_text("owner")
+        saved = AppConfig.load(live.config_path)
+        assert saved.web.username == "owner" and saved.web.password_hash.startswith("pbkdf2_sha256$")
+    finally:
+        context.close()
+        live.stop()
+
+
+def test_change_credentials_in_settings(page: Page, server: LiveServer) -> None:
+    page.click("#navSettings")
+    expect(page.locator("#accountUsername")).to_have_value(TEST_USER)
+    page.fill("#accountUsername", "trader")
+    page.fill("#accountCurrentPassword", "not the password")
+    page.fill("#accountNewPassword", "brand new password")
+    page.fill("#accountConfirmPassword", "brand new password")
+    page.click("#accountSaveButton")
+    expect(page.locator("#accountStatus")).to_contain_text("Current password is incorrect")
+    page.fill("#accountCurrentPassword", TEST_PASSWORD)
+    page.click("#accountSaveButton")
+    expect(page.locator("#accountStatus")).to_contain_text("Credentials updated")
+    expect(page.locator("#userName")).to_have_text("trader")
+    saved = AppConfig.load(server.config_path)
+    assert saved.web.username == "trader"
+    # Still signed in with the renewed session; the app keeps working.
+    page.click("#navDashboard")
+    page.click("#refreshButton")
+    expect(page.locator("#chartStatusLabel")).to_contain_text("data as of")
+
+
+def test_missing_api_key_banner_and_demo_switch(browser: Browser, tmp_path: Path) -> None:
+    """The shipped configuration (Alpha Vantage, no key) must be usable: banner + one-click demo data."""
+    live = start_live_server(write_project(tmp_path, data={"provider": "alphavantage", "api_key": ""}))
+    context = browser.new_context(viewport={"width": 1440, "height": 900})
+    try:
+        page = context.new_page()
+        page.goto(live.url)
+        page.wait_for_url("**/login")
+        page.fill("#usernameInput", TEST_USER)
+        page.fill("#passwordInput", TEST_PASSWORD)
+        page.click("#loginButton")
+        page.wait_for_url(live.url)
+        banner = page.locator("#apiKeyBanner")
+        expect(banner).to_be_visible()
+        expect(banner).to_contain_text("needs an API key")
+        expect(page.locator("#chartStatusLabel")).to_contain_text("requires an API key", timeout=10000)
+        expect(page.locator("#watchlistTable tbody tr").first.locator("td").nth(3)).to_have_text("error")
+
+        page.click("#bannerUseDemoButton")
+        page.wait_for_function("window.__app && window.__app.chart.bars.length > 0", timeout=15000)
+        expect(banner).to_be_hidden()
+        expect(page.locator("#budgetLabel")).to_contain_text("demo")
+        expect(page.locator("#watchlistTable tbody tr").first.locator("td").nth(1)).not_to_have_text("-")
+        assert AppConfig.load(live.config_path).data.provider == "demo"
+
+        # "Enter API key" leads to Settings, where a key for a real provider is applied live.
+        page.click("#navDashboard")
+        page.click("#navSettings")
+        page.select_option("#settingsProvider", "twelvedata")
+        page.fill("#settingsApiKey", "entered-later")
+        page.click("#settingsSaveButton")
+        expect(page.locator("#settingsStatus")).to_contain_text("applied")
+        expect(page.locator("#budgetLabel")).to_contain_text("twelvedata")
+        expect(page.locator("#apiKeyNote")).to_contain_text("A key is stored")
+        saved = AppConfig.load(live.config_path)
+        assert saved.data.provider == "twelvedata" and saved.data.api_key == "entered-later"
     finally:
         context.close()
         live.stop()

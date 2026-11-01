@@ -1,7 +1,7 @@
 /** Trading Bot single-page application. */
 
 import { CandleChart, drawEquityCurve } from "./chart.js";
-import { api, askToken, beep, confirmDialog, connectEvents, el, fmt, fmtSeconds, fmtSigned, fmtTime, icon, notifyBrowser, showSnackbar } from "./ui.js";
+import { api, beep, confirmDialog, connectEvents, el, fmt, fmtSeconds, fmtSigned, fmtTime, icon, notifyBrowser, showSnackbar } from "./ui.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -16,6 +16,7 @@ const state = {
   settings: null,
   lastBacktest: null,
   signalsCount: 0,
+  user: null,
 };
 
 const chart = new CandleChart($("chartCanvas"));
@@ -57,7 +58,25 @@ function applyStatus(status) {
     $("marketChipText").textContent = `Market closed · opens ${when ? when.toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" }) : "?"} ${status.market_timezone}`;
   }
   $("budgetLabel").textContent = `${status.provider} · ${status.budget.text}`;
+  const banner = $("apiKeyBanner");
+  banner.classList.toggle("hidden", !status.requires_api_key);
+  if (status.requires_api_key) {
+    $("apiKeyBannerText").textContent = `The ${status.provider} provider needs an API key before market data can be loaded. Enter it under Settings, or switch to demo data to explore the app.`;
+  }
 }
+
+$("bannerSettingsButton").addEventListener("click", () => { showView("settings"); $("settingsApiKey").focus(); });
+$("bannerUseDemoButton").addEventListener("click", async () => {
+  try {
+    const result = await api.post("/api/settings/provider", { provider: "demo" });
+    applyStatus(result.status);
+    showSnackbar("Using demo market data", { duration: 4000 });
+    await loadWatchlist();
+    if (state.selected) await loadBars(state.selected);
+  } catch (err) {
+    showSnackbar(err.message, { kind: "error" });
+  }
+});
 
 async function refreshStatus() {
   applyStatus(await api.get("/api/status"));
@@ -170,7 +189,7 @@ async function loadBars(symbol) {
     updateChartStatus(data);
     await applyOverlay();
   } catch (err) {
-    chart.setData(symbol, []);
+    chart.setData(symbol, [], { message: `No data for ${symbol}` });
     $("chartStatusLabel").textContent = `ERROR: ${err.message}`;
     $("chartStatusLabel").className = "chart-status error-text";
   }
@@ -604,7 +623,7 @@ async function loadSettings() {
   interval.replaceChildren(...s.options.intervals.map((p) => el("option", { value: p, text: p })));
   interval.value = s.data.interval;
   $("settingsApiKey").value = "";
-  $("apiKeyNote").textContent = s.data.api_key_set ? "A key is stored. Leave blank to keep it; or set TRADING_BOT_API_KEY." : "No key stored. Required for alphavantage / twelvedata.";
+  $("apiKeyNote").textContent = s.data.api_key_set ? "A key is stored. Leave blank to keep it; or set TRADING_BOT_API_KEY." : "No key stored yet - required for alphavantage / twelvedata (demo and csv need none).";
   $("settingsBars").value = s.data.bars;
   $("settingsScanInterval").value = s.scan_interval;
   const budget = s.options.budgets[s.data.provider] || { per_minute: 5, per_day: 25 };
@@ -622,13 +641,14 @@ async function loadSettings() {
   $("settingsInitialCash").value = s.trading.initial_cash;
   $("settingsPositionSize").value = Math.round(s.trading.position_size_pct * 100);
   $("settingsMaxPositions").value = s.trading.max_positions;
+  $("accountUsername").value = s.web.username || "";
   updateProviderNote();
 }
 
 function updateProviderNote() {
   const provider = $("settingsProvider").value;
   const budget = state.settings?.options.budgets[provider];
-  $("providerNote").textContent = budget ? `Free tier: ${budget.per_minute} requests/min, ${budget.per_day}/day. Provider and API key changes take effect after restarting the server.` : "";
+  $("providerNote").textContent = budget ? `Free tier: ${budget.per_minute} requests/min, ${budget.per_day}/day. Changes are applied immediately.` : "";
 }
 $("settingsProvider").addEventListener("change", updateProviderNote);
 
@@ -653,8 +673,12 @@ $("settingsForm").addEventListener("submit", async (e) => {
     applyStatus(result.status);
     await loadSettings();
     status.className = "body-medium success-text";
-    status.textContent = result.restart_required ? "Settings saved. Restart the server to apply the new provider / API key." : "Settings saved.";
+    status.textContent = result.data_reconfigured ? "Settings saved and applied - market data is being reloaded." : "Settings saved.";
     showSnackbar("Settings saved", { duration: 3000 });
+    if (result.data_reconfigured) {
+      await loadWatchlist();
+      if (state.selected) await loadBars(state.selected);
+    }
   } catch (err) {
     status.className = "body-medium error-text";
     status.textContent = err.message;
@@ -691,11 +715,14 @@ function onEvent(message) {
         label.className = "chart-status error-text";
         label.title = label.textContent;
       }
-      showSnackbar(`${message.symbol}: ${message.message}`, { kind: "error", duration: 8000 });
+      if (!message.message.includes("requires an API key")) {  // the banner already says so
+        showSnackbar(`${message.symbol}: ${message.message}`, { kind: "error", duration: 8000 });
+      }
       break;
     }
     case "status":
       if (message.level === "error") showSnackbar(message.message, { kind: "error", duration: 8000 });
+      else if (message.message.startsWith("Market data provider set to")) { refreshStatus(); loadWatchlist(); }
       break;
     case "scan":
       applyStatus(message.status);
@@ -716,14 +743,45 @@ function onEvent(message) {
 // Boot
 // =========================================================================
 
+async function loadUser() {
+  const auth = await api.get("/api/auth/status");
+  if (!auth.authenticated) { location.replace("/login"); return false; }
+  state.user = auth.username;
+  $("userName").textContent = auth.username;
+  $("userAvatar").textContent = (auth.username || "?").slice(0, 1).toUpperCase();
+  return true;
+}
+
+$("logoutButton").addEventListener("click", async () => {
+  try { await api.post("/api/auth/logout"); } finally { location.replace("/login"); }
+});
+
+$("accountSaveButton").addEventListener("click", async () => {
+  const status = $("accountStatus");
+  const newPassword = $("accountNewPassword").value;
+  if (newPassword !== $("accountConfirmPassword").value) {
+    status.className = "body-medium error-text"; status.textContent = "Passwords do not match"; return;
+  }
+  try {
+    const result = await api.post("/api/auth/password", { username: $("accountUsername").value.trim() || null,
+      current_password: $("accountCurrentPassword").value, new_password: newPassword });
+    state.user = result.username;
+    $("userName").textContent = result.username;
+    $("userAvatar").textContent = result.username.slice(0, 1).toUpperCase();
+    for (const id of ["accountCurrentPassword", "accountNewPassword", "accountConfirmPassword"]) $(id).value = "";
+    status.className = "body-medium success-text"; status.textContent = "Credentials updated.";
+    showSnackbar("Credentials updated", { duration: 3000 });
+  } catch (err) {
+    status.className = "body-medium error-text"; status.textContent = err.message;
+  }
+});
+
 async function boot() {
   try {
+    if (!(await loadUser())) return;
     await refreshStatus();
   } catch (err) {
-    if (err.status === 401) {
-      api.setToken(await askToken());
-      return boot();
-    }
+    if (err.message === "Authentication required") return;
     showSnackbar(`Cannot reach the server: ${err.message}`, { kind: "error" });
     return;
   }
@@ -734,10 +792,6 @@ async function boot() {
   await loadSignals();
   const view = location.hash.replace("#", "");
   if (["dashboard", "strategies", "positions", "settings"].includes(view)) showView(view);
-  if (state.status?.requires_api_key) {
-    showSnackbar(`The ${state.status.provider} provider needs an API key - set it under Settings.`, { kind: "error", duration: 12000, action: "Settings",
-      onAction: () => showView("settings") });
-  }
 }
 
 boot();

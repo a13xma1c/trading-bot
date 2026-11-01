@@ -431,3 +431,25 @@ def test_background_workers_are_joined_on_close(tmp_path: Path) -> None:
     assert engine.stats.scans == 1
     assert engine.latest_bars("MSFT") is not None
     assert not any(isinstance(e, StatusEvent) and e.level == "error" for e in events)
+
+
+def test_reconfigure_data_swaps_provider_live(tmp_path: Path) -> None:
+    engine, received, events, clock = make_engine(tmp_path, [always_buy()], watchlist=("AAPL",))
+    engine.scan_once()
+    first = engine.data
+    assert engine.latest_bars("AAPL") is not None
+    engine.config.data.provider = "alphavantage"
+    engine.config.data.api_key = ""
+    service = engine.reconfigure_data()
+    assert service is engine.data and service is not first
+    assert service.provider.name == "alphavantage"
+    assert engine.latest_bars("AAPL") is None  # cache dropped with the old provider
+    assert any(isinstance(e, StatusEvent) and "alphavantage" in e.message for e in events)
+    engine.scan_once()  # no key: reported per symbol, never raises
+    error = engine.last_error("AAPL")
+    assert error is not None and "API key" in error
+    engine.config.data.provider = "demo"
+    engine.reconfigure_data()
+    assert engine.last_error("AAPL") is None
+    engine.scan_once()
+    assert engine.latest_bars("AAPL") is not None

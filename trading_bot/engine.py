@@ -130,9 +130,11 @@ class EngineStats:
 class TradingEngine:
     def __init__(self, config: AppConfig, data: MarketDataService, strategies: StrategyStore,
                  notifier: Notifier, broker: Broker | None = None, storage: Storage | None = None,
-                 bus: EventBus | None = None):
+                 bus: EventBus | None = None,
+                 data_factory: Callable[[AppConfig], MarketDataService] | None = None):
         self.config = config
         self.data = data
+        self._data_factory = data_factory
         self.strategies = strategies
         self.notifier = notifier
         self.broker = broker or PaperBroker(config.trading.initial_cash)
@@ -190,6 +192,36 @@ class TradingEngine:
     def latest_prices(self) -> dict[str, float]:
         with self._lock:
             return {s: float(r.bars["close"].iloc[-1]) for s, r in self._latest.items() if not r.empty}
+
+    def reconfigure_data(self, service: MarketDataService | None = None) -> MarketDataService:
+        """Replace the market-data service at runtime (after the provider, API key or budget changed).
+
+        Cached bars and per-symbol errors are dropped; a scan is requested if the loop is running so
+        the watchlist refreshes with the new provider right away.
+        """
+        if service is None:
+            if self._data_factory is not None:
+                service = self._data_factory(self.config)
+            else:
+                from .data import RateLimiter, create_provider  # noqa: PLC0415 - avoid import cycle at module level
+
+                provider = create_provider(self.config.data.provider, self.config.data.api_key,
+                                           self.config.csv_directory_path)
+                per_minute, per_day = self.config.data.budget()
+                service = MarketDataService(provider, RateLimiter(per_minute, per_day),
+                                            cache_ttl=self.config.data.cache_ttl_seconds)
+        with self._lock:
+            old = self.data
+            self.data = service
+            self._latest.clear()
+            self._errors.clear()
+        if old is not service:
+            old.close()
+        logger.info("Market data provider is now %r", service.provider.name)
+        self.bus.publish(StatusEvent(f"Market data provider set to {service.provider.name}", "info"))
+        if self.running:
+            self.request_scan()
+        return service
 
     def last_error(self, symbol: str) -> str | None:
         with self._lock:

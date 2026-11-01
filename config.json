@@ -60,7 +60,10 @@
   "web": {
     "host": "127.0.0.1",
     "port": 8080,
+    "username": "admin",
+    "password_hash": "",
     "token": "",
+    "session_hours": 12,
     "open_browser": true
   }
 }

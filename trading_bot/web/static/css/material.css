@@ -342,6 +342,14 @@ dialog h2 { margin: 0; }
 .snackbar.signal.sell { border-left-color: var(--app-color-down); }
 .snackbar.error { border-left: 4px solid var(--md-sys-color-error); }
 
+/* ------------------------------------------------------------- banner */
+.banner {
+  display: flex; align-items: center; gap: 12px; padding: 12px 24px; margin: 16px 24px 0;
+  background: var(--md-sys-color-error-container); color: var(--md-sys-color-on-error-container);
+  border-radius: var(--md-sys-shape-corner-medium);
+}
+.banner .btn.text { color: var(--md-sys-color-on-error-container); }
+
 /* ----------------------------------------------------------- progress */
 .progress { height: 4px; border-radius: 2px; background: var(--md-sys-color-surface-container-highest); overflow: hidden; display: none; }
 .progress.active { display: block; }
@@ -369,3 +377,13 @@ dialog h2 { margin: 0; }
 .params-table input { width: 100%; background: var(--md-sys-color-surface-container-highest); border: 0; border-radius: var(--md-sys-shape-corner-extra-small); padding: 8px 10px; color: inherit; }
 .hidden { display: none !important; }
 .tooltip { cursor: help; text-decoration: underline dotted; }
+
+/* ---------------------------------------------------------------- login */
+.login-body { display: grid; place-items: center; min-height: 100%; background: radial-gradient(1200px 600px at 20% 0%, #1d2a44 0%, var(--md-sys-color-surface) 60%); }
+.login-layout { width: 100%; display: grid; place-items: center; padding: 24px; }
+.login-card { width: 420px; max-width: 100%; padding: 32px; border-radius: var(--md-sys-shape-corner-extra-large); box-shadow: var(--md-sys-elevation-3); }
+.login-brand { display: flex; align-items: center; gap: 16px; margin-bottom: 24px; }
+.login-brand .brand { width: 56px; height: 56px; display: grid; place-items: center; border-radius: var(--md-sys-shape-corner-large); background: var(--md-sys-color-primary-container); color: var(--md-sys-color-on-primary-container); flex-shrink: 0; }
+.login-submit { width: 100%; }
+.user-chip { display: inline-flex; align-items: center; gap: 8px; }
+.avatar { width: 28px; height: 28px; border-radius: 50%; background: var(--md-sys-color-tertiary-container); color: var(--md-sys-color-on-tertiary-container); display: grid; place-items: center; font-size: 12px; font-weight: 500; }

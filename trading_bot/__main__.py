@@ -39,6 +39,9 @@ def _parser() -> argparse.ArgumentParser:
     bt.add_argument("--bars", type=int, help="number of bars (default: config)")
     bt.add_argument("--cash", type=float, default=10_000.0)
     sub.add_parser("check", help="validate configuration and strategies")
+    pw = sub.add_parser("set-password", help="set the web UI login (stored as a PBKDF2 hash in the config file)")
+    pw.add_argument("--username", help="login name (default: keep the configured one)")
+    pw.add_argument("--password", help="password (prompted securely when omitted; or TRADING_BOT_WEB_PASSWORD)")
     return p
 
 
@@ -60,6 +63,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run(config, once=(command == "scan" or args.once), as_json=(command == "scan"))
     if command == "backtest":
         return _backtest(config, args)
+    if command == "set-password":
+        return _set_password(config, args)
     return 1
 
 
@@ -72,6 +77,30 @@ def _serve(config: AppConfig, args: argparse.Namespace) -> int:
                      open_browser=False if getattr(args, "no_browser", False) else None)
     finally:
         engine.close()
+
+
+def _set_password(config: AppConfig, args: argparse.Namespace) -> int:
+    import getpass
+    import os
+
+    from .web.auth import hash_password, validate_password_strength
+
+    password = args.password or os.environ.get("TRADING_BOT_WEB_PASSWORD")
+    if not password:
+        password = getpass.getpass("New password: ")
+        if password != getpass.getpass("Confirm password: "):
+            print("Passwords do not match", file=sys.stderr)
+            return 1
+    problem = validate_password_strength(password)
+    if problem:
+        print(problem, file=sys.stderr)
+        return 1
+    if args.username:
+        config.web.username = args.username.strip()
+    config.web.password_hash = hash_password(password)
+    config.save(args.config)
+    print(f"Login for user {config.web.username!r} saved to {args.config}")
+    return 0
 
 
 def _check(config: AppConfig) -> int:
